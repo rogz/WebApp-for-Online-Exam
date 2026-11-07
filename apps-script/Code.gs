@@ -34,11 +34,11 @@ const HEADERS = {
   Questions: ['QuestionID', 'Type', 'Question', 'Choices', 'Answer', 'Points', 'Topic'],
   Exams: ['ExamID', 'Title', 'Instructions', 'QuestionIDs', 'StartDateTime', 'EndDateTime',
     'TimeLimitMinutes', 'ShuffleQuestions', 'ShuffleChoices', 'ShowScore', 'Active', 'Course',
-    'DisplayMode', 'AllowBack'],
+    'DisplayMode', 'AllowBack', 'FaceMonitor'],
   Roster: ['StudentID', 'Name', 'Email', 'AccessCode', 'Courses'],
   Attempts: ['AttemptID', 'ExamID', 'StudentID', 'Name', 'Status', 'StartedAt', 'Deadline',
     'SubmittedAt', 'Score', 'MaxScore', 'Percent', 'PendingEssays', 'Late', 'VoidReason',
-    'VoidedAt', 'AllowRetake', 'IsRetake', 'UserAgent', 'Course'],
+    'VoidedAt', 'AllowRetake', 'IsRetake', 'UserAgent', 'Course', 'Warnings'],
   Responses: ['AttemptID', 'ExamID', 'StudentID', 'QuestionID', 'Type', 'Question',
     'StudentAnswer', 'CorrectAnswer', 'IsCorrect', 'PointsEarned', 'MaxPoints'],
   Violations: ['Timestamp', 'AttemptID', 'ExamID', 'StudentID', 'Name', 'Event', 'Detail'],
@@ -52,7 +52,12 @@ const DEFAULT_SETTINGS = [
   ['REQUIRE_MONITOR_CHECK', true, 'TRUE = only browsers that can detect extra monitors (Chrome / Edge on a computer) may take exams.'],
   ['BLOCK_COPY_PASTE', true, 'TRUE = disable copy, paste and right-click on the exam page.'],
   ['SUBMIT_GRACE_SECONDS', 60, 'Extra seconds after the deadline during which a submission is still on time (network delays).'],
+  ['FACE_GRACE_SECONDS', 3, 'Camera-monitored exams: seconds a problem (face hidden, camera covered, extra person, phone) must last before it counts. 1st time = warning, 2nd time = voided.'],
+  ['PHONE_DETECTION', true, 'Camera-monitored exams: TRUE = also watch for a mobile phone held in front of the camera.'],
 ];
+
+/** Camera events give one warning first; the next one voids the exam. */
+const WARNABLE_EVENTS = ['NO_FACE', 'CAMERA_BLOCKED', 'MULTIPLE_FACES', 'PHONE_DETECTED', 'CAMERA_OFF'];
 
 const STATUS = {
   IN_PROGRESS: 'IN_PROGRESS',
@@ -66,6 +71,11 @@ const VIOLATION_LABELS = {
   LEFT_WINDOW: 'Left the exam window (for example Alt+Tab to another application)',
   SECOND_MONITOR: 'A second monitor was connected during the exam',
   PAGE_CLOSED: 'Closed or reloaded the exam page',
+  NO_FACE: 'Face was not visible to the camera',
+  CAMERA_BLOCKED: 'The camera was covered or blocked',
+  MULTIPLE_FACES: 'More than one person was in front of the camera',
+  PHONE_DETECTED: 'A mobile phone was seen on camera',
+  CAMERA_OFF: 'The camera was turned off or disconnected',
 };
 
 // ───────────────────────────── Web App API ─────────────────────────────
@@ -104,6 +114,7 @@ const API_ = {
         title: exam.title,
         course: exam.course,
         displayMode: exam.displayMode,
+        faceMonitor: exam.faceMonitor,
         allowBack: exam.allowBack,
         instructions: exam.instructions,
         questionCount: questions.length,
@@ -122,6 +133,8 @@ const API_ = {
         blurGraceSeconds: settings.BLUR_GRACE_SECONDS,
         requireMonitorCheck: settings.REQUIRE_MONITOR_CHECK,
         blockCopyPaste: settings.BLOCK_COPY_PASTE,
+        faceGraceSeconds: settings.FACE_GRACE_SECONDS,
+        phoneDetection: settings.PHONE_DETECTION,
       },
       rosterEnabled: roster.length > 0,
       requiresAccessCode: roster.some(r => String(r.AccessCode).trim() !== ''),
@@ -202,6 +215,9 @@ const API_ = {
         if (settings.REQUIRE_MONITOR_CHECK && env.monitorCheck !== 'supported') {
           throw apiError_('UNSUPPORTED_BROWSER', 'Please open the exam in Google Chrome or Microsoft Edge on a laptop or desktop computer.');
         }
+        if (exam.faceMonitor && env.camera !== 'ok') {
+          throw apiError_('CAMERA_REQUIRED', 'This exam requires your camera. Turn it on and make sure your face is visible.');
+        }
 
         let deadline = exam.limitMin > 0 ? new Date(now.getTime() + exam.limitMin * 60000) : null;
         if (!isRetake && exam.end && (!deadline || exam.end < deadline)) deadline = exam.end;
@@ -252,8 +268,17 @@ const API_ = {
       const attempts = readTable_(SHEET.ATTEMPTS);
       const a = findAttempt_(attempts, req.attemptId);
       const event = VIOLATION_LABELS[req.event] ? req.event : 'TAB_SWITCH';
-      logViolation_(a, event, req.detail);
-      if (a.Status === STATUS.IN_PROGRESS) voidAttempt_(attempts, a, event);
+      if (a.Status !== STATUS.IN_PROGRESS) {
+        logViolation_(a, event, req.detail);
+        return { status: a.Status, reason: a.VoidReason };
+      }
+      if (WARNABLE_EVENTS.indexOf(event) !== -1 && !(Number(a.Warnings) > 0)) {
+        logViolation_(a, event, 'WARNING (1st offense): ' + String(req.detail || ''));
+        updateFields_(attempts, a, { Warnings: 1 });
+        return { status: a.Status, warned: true };
+      }
+      logViolation_(a, event, (WARNABLE_EVENTS.indexOf(event) !== -1 ? 'VOIDED (2nd offense): ' : 'VOIDED: ') + String(req.detail || ''));
+      voidAttempt_(attempts, a, event);
       return { status: a.Status, reason: a.VoidReason };
     });
   },
@@ -438,6 +463,7 @@ function examConfig_(row) {
     showScore: toBool_(row.ShowScore, true),
     course: String(row.Course || '').trim(),
     displayMode: String(row.DisplayMode || '').trim().toUpperCase() === 'ONE' ? 'ONE' : 'ALL',
+    faceMonitor: toBool_(row.FaceMonitor, false),
   };
   // "No going back" only makes sense when questions are shown one at a time
   cfg.allowBack = cfg.displayMode === 'ONE' ? toBool_(row.AllowBack, true) : true;
@@ -664,7 +690,7 @@ function builderGetData() {
       end: e.end ? Utilities.formatDate(e.end, tz, "yyyy-MM-dd'T'HH:mm") : '',
       limitMin: e.limitMin, shuffleQuestions: e.shuffleQuestions, shuffleChoices: e.shuffleChoices,
       showScore: e.showScore, active: toBool_(r.Active, true), link: examLink_(e.id, settings),
-      displayMode: e.displayMode, allowBack: e.allowBack,
+      displayMode: e.displayMode, allowBack: e.allowBack, faceMonitor: e.faceMonitor,
     };
   });
   return {
@@ -727,6 +753,7 @@ function builderSaveExam(form) {
     Active: form.active !== false,
     Course: asText_(String(form.course || '').trim()),
     DisplayMode: form.displayMode === 'ONE' ? 'ONE' : 'ALL',
+    FaceMonitor: !!form.faceMonitor,
     AllowBack: form.displayMode === 'ONE' ? form.allowBack !== false : true,
   };
   const existing = table.rows.find(r => String(r.ExamID).trim().toLowerCase() === examId.toLowerCase());
@@ -886,6 +913,8 @@ function getSettings_() {
   } catch (e) { /* use defaults */ }
   s.BLUR_GRACE_SECONDS = Math.max(0, Number(s.BLUR_GRACE_SECONDS) || 0);
   s.SUBMIT_GRACE_SECONDS = Math.max(0, Number(s.SUBMIT_GRACE_SECONDS) || 0);
+  s.FACE_GRACE_SECONDS = Math.max(1, Number(s.FACE_GRACE_SECONDS) || 3);
+  s.PHONE_DETECTION = toBool_(s.PHONE_DETECTION, true);
   s.REQUIRE_MONITOR_CHECK = toBool_(s.REQUIRE_MONITOR_CHECK, true);
   s.BLOCK_COPY_PASTE = toBool_(s.BLOCK_COPY_PASTE, true);
   s.STUDENT_APP_URL = String(s.STUDENT_APP_URL || '').trim();

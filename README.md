@@ -15,6 +15,7 @@ A free online exam system that needs **no database and no paid server**:
 | Question bank | Teachers pick questions in an **Exam Builder** window inside Google Sheets |
 | Rules screen | Before starting, students are told that switching tabs voids the exam and that a second monitor must be disconnected. They must tick "I agree". |
 | System check | **Start** stays disabled while a second monitor is connected |
+| Camera monitoring | Optional per exam. The student's face must be visible before they can start. During the exam, a hidden face, a covered camera, a second person, a phone, or the camera turning off gives **one warning**, and **the second time voids the exam**. Video is checked in the browser only: nothing is recorded or uploaded. |
 | Anti-cheating | Switching tabs, minimizing, Alt+Tab, leaving or reloading the page, or plugging in a monitor mid-exam **voids the exam immediately**. A pop-up tells the student to inform their instructor. |
 | Time | Per-exam **time window** (opens/closes) and **time limit** (auto-submits when time is up) |
 | Retakes | The instructor can let a voided (or finished) student take the exam again |
@@ -77,6 +78,7 @@ Use **Exam Admin → Check question bank for errors** to catch mistakes. You can
   - *All questions on one page*: students scroll and can change any answer until they submit.
   - *One question at a time*: Next / Previous buttons plus numbered buttons to jump between questions.
     - Untick **Allow going back** to make it forward-only. There is no Previous button, and each answer is **locked on the server** when the student clicks Next, saved in the `Progress` sheet. Students are warned before skipping an unanswered question.
+- **Require camera**: turns on face and obstruction monitoring for that exam (see below).
 - Options: shuffle questions, shuffle choices, show the score after submitting, active.
 - Click **Save exam**, then **Copy student link**.
 
@@ -114,6 +116,20 @@ If the Roster is empty, anyone with an exam link can take it. If you fill it in,
 - **AccessCode** (optional): if filled in, the student must type it. This stops someone from using another student's ID.
 - The **Attempts** sheet records the course of each attempt, so you can filter results by course.
 
+### Camera monitoring
+Tick **Require camera** in the Exam Builder. Then:
+- On the rules screen, students click **Turn on camera**. **Start exam** stays disabled until exactly one face is clearly visible.
+- During the exam, a small camera preview stays in the corner. Each of these counts as an offense if it lasts longer than `FACE_GRACE_SECONDS` (default 3 s):
+  - the face is not visible (covered, turned away, or left the seat)
+  - the camera is covered or too dark
+  - more than one person is in view
+  - a mobile phone is held in front of the camera
+  - the camera is turned off (this one counts immediately)
+- **1st offense:** a warning box. The student can only continue once the problem is fixed. It's logged in **Violations** as a warning, and **Attempts → Warnings** becomes 1.
+- **2nd offense:** the exam is voided, just like a tab switch.
+- Detection runs in the browser using Google MediaPipe, loaded from a CDN on first use (about 5 MB). Nothing is recorded or uploaded. Students need a webcam and Chrome or Edge.
+- Limits: a phone held below the desk or outside the camera's view can't be seen, and phone detection can sometimes miss or mistake objects. That's why a phone gets a warning first, not an instant void.
+
 ### Settings sheet
 | Key | Default | Meaning |
 |---|---|---|
@@ -122,6 +138,8 @@ If the Roster is empty, anyone with an exam link can take it. If you fill it in,
 | `REQUIRE_MONITOR_CHECK` | `TRUE` | Only allow browsers that can detect extra monitors (Chrome or Edge on a computer). Set `FALSE` to allow Firefox, Safari, and phones; monitors can't be checked there. |
 | `BLOCK_COPY_PASTE` | `TRUE` | Disables copy, paste, and right-click during the exam |
 | `SUBMIT_GRACE_SECONDS` | `60` | Seconds after the deadline that a submission still counts as on time |
+| `FACE_GRACE_SECONDS` | `3` | Camera exams: how long a problem must last before it counts as an offense |
+| `PHONE_DETECTION` | `TRUE` | Camera exams: also look for a phone held in front of the camera |
 
 ---
 
@@ -151,4 +169,6 @@ docs/               student exam page (served by GitHub Pages)
 ```
 
 ## Developer tests
+`tests/camera.test.js` runs the camera flow with the real MediaPipe detector and a fake webcam. See the comments at the top of the file for setup.
+
 `node tests/e2e.test.js` runs the backend against a fake Google Sheet and drives the student page in Chromium (needs the `playwright` package). It covers grading, tab-switch, Alt+Tab and second-monitor voiding, retakes, time limits, time windows, and essay re-scoring.

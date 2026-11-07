@@ -28,6 +28,7 @@
     allowBack: true,     // may return to earlier questions (one-at-a-time mode)
     index: 0,            // current question in one-at-a-time mode
     locked: new Set(),   // questions that can no longer be changed
+    cam: { required: false, warnings: 0, warningOpen: false, offenseArmed: true },
   };
 
   // ───────── API ─────────
@@ -115,7 +116,100 @@
     else setCheck('checkMonitor', m === 'single', m === 'single'
       ? 'One screen detected'
       : 'A second monitor is connected. Disconnect it to start the exam.');
-    return browserOk && m !== 'multiple';
+    return browserOk && m !== 'multiple' && cameraCheckPasses();
+  }
+
+  // ───────── Camera ─────────
+
+  const CAM_TEXT = {
+    OFF: 'Camera off',
+    LOADING: 'Loading face detection…',
+    OK: '✓ Face detected',
+    NO_FACE: 'No face detected',
+    CAMERA_BLOCKED: 'Camera is covered or too dark',
+    MULTIPLE_FACES: 'More than one person in view',
+    PHONE_DETECTED: 'Phone detected',
+    CAMERA_OFF: 'Camera turned off',
+  };
+  const CAM_HELP = {
+    NO_FACE: 'Make sure your whole face is visible and well lit, facing the screen.',
+    CAMERA_BLOCKED: 'Uncover the camera and make sure the room is bright enough.',
+    MULTIPLE_FACES: 'Only you may be in front of the camera.',
+    PHONE_DETECTED: 'Put your phone away, out of the camera\'s view.',
+    CAMERA_OFF: 'Your camera stopped. Turn it back on to continue.',
+  };
+
+  function cameraCheckPasses() {
+    if (!state.cam.required) return true;
+    const st = window.ExamCamera.status();
+    setCheck('checkCamera', st === 'OK', st === 'OK' ? 'Face detected'
+      : st === 'OFF' ? 'Turn on your camera below.'
+        : st === 'LOADING' ? 'Loading face detection…' : CAM_TEXT[st] + '. ' + (CAM_HELP[st] || ''));
+    return st === 'OK';
+  }
+
+  function paintCamBadge(boxId, badgeId, st) {
+    const box = $(boxId);
+    box.classList.toggle('ok', st === 'OK');
+    box.classList.toggle('bad', st !== 'OK' && st !== 'LOADING' && st !== 'OFF');
+    $(badgeId).textContent = CAM_TEXT[st] || st;
+  }
+
+  async function turnOnCamera() {
+    $('camBtn').disabled = true;
+    $('camError').hidden = true;
+    try {
+      await window.ExamCamera.start($('camVideo'), { phoneDetection: state.rules.phoneDetection, onStatus: onCamStatus });
+      $('camBtn').hidden = true;
+    } catch (e) {
+      $('camError').textContent = e.message;
+      $('camError').hidden = false;
+      $('camBtn').disabled = false;
+    }
+    refreshStartButton();
+  }
+
+  /** Called by camera.js about twice a second. */
+  function onCamStatus(st, ageMs) {
+    paintCamBadge('camBox', 'camBadge', st);
+    if (!state.attemptId) { refreshStartButton(); return; }
+    if (state.cam.warningOpen) {
+      paintCamBadge('faceWarnBox', 'faceWarnBadge', st);
+      $('faceWarnOk').disabled = st !== 'OK';
+      $('camRestartBtn').hidden = st !== 'CAMERA_OFF';
+      return;
+    }
+    if (!state.active || !state.cam.required) return;
+    if (st === 'OK') { state.cam.offenseArmed = true; return; }
+    if (st === 'LOADING' || st === 'OFF' || !state.cam.offenseArmed) return;
+    const graceMs = st === 'CAMERA_OFF' ? 0 : Math.max(1, state.rules.faceGraceSeconds || 3) * 1000;
+    if (ageMs >= graceMs) cameraOffense(st, CAM_TEXT[st] + ' for ' + Math.round(ageMs / 1000) + ' s.');
+  }
+
+  /** 1st offense: warning. 2nd offense: void. The server applies the same rule. */
+  function cameraOffense(event, detail) {
+    state.cam.offenseArmed = false;
+    state.cam.warnings++;
+    if (state.cam.warnings >= 2) { voidExam(event, detail); return; }
+    showFaceWarning(event);
+    api('violation', { attemptId: state.attemptId, event, detail }, 3)
+      .then((r) => { if (r.status === 'VOIDED') { state.violations.push({ event, detail }); showVoid(event); } })
+      .catch((e) => { if (e.code === 'VOIDED') showVoid(event); else beacon('violation', { attemptId: state.attemptId, event, detail }); });
+  }
+
+  function showFaceWarning(event) {
+    state.cam.warningOpen = true;
+    $('faceWarnReason').textContent = REASONS[event] || CAM_TEXT[event];
+    window.ExamCamera.mirrorTo($('faceWarnVideo'));
+    $('faceWarnOk').disabled = true;
+    $('faceWarnModal').hidden = false;
+  }
+
+  function closeFaceWarning() {
+    if (window.ExamCamera.status() !== 'OK') return;
+    $('faceWarnModal').hidden = true;
+    state.cam.warningOpen = false;
+    state.cam.offenseArmed = true;
   }
 
   function windowStatusNow() {
@@ -161,6 +255,14 @@
     $('factWindow').textContent = (exam.startText ? 'From ' + exam.startText : 'Now') + (exam.endText ? ' until ' + exam.endText : '');
     $('accessCodeWrap').hidden = !state.info.requiresAccessCode;
     $('rulePaste').hidden = !rules.blockCopyPaste;
+    state.cam.required = !!exam.faceMonitor;
+    $('ruleCamera').hidden = !state.cam.required;
+    $('checkCamera').hidden = !state.cam.required;
+    $('cameraPanel').hidden = !state.cam.required;
+    if (state.cam.required) {
+      $('agreeText').textContent = 'I have read the rules. I understand that switching tabs or windows or using a second monitor will void my exam, ' +
+        'and that my camera is monitored: I get one warning, and a second camera problem will void my exam.';
+    }
     const nav = $('ruleNav');
     if (exam.displayMode === 'ONE') {
       nav.hidden = false;
@@ -197,6 +299,7 @@
           userAgent: navigator.userAgent,
           isExtended: m === 'multiple',
           monitorCheck: m === 'unsupported' ? 'unsupported' : 'supported',
+          camera: state.cam.required && window.ExamCamera.status() === 'OK' ? 'ok' : 'none',
         },
       }, 2);
       busy(false);
@@ -240,6 +343,11 @@
     if (state.oneAtATime) setupPager();
     if (state.rules.blockCopyPaste) document.body.classList.add('locked');
     state.active = true;
+    if (state.cam.required) {
+      $('camFloat').appendChild($('camBox')); // moving the element pauses it, so resume
+      $('camFloat').hidden = false;
+      window.ExamCamera.resume();
+    }
     tick();
     state.timerId = setInterval(tick, 250);
     // A monitor may have been connected while the start request was in flight
@@ -503,6 +611,7 @@
   function finishExam() {
     state.active = false;
     clearInterval(state.timerId);
+    stopCamera();
     document.body.classList.remove('locked');
     try { localStorage.removeItem(storageKey()); } catch (e) { /* ignore */ }
   }
@@ -528,6 +637,11 @@
     LEFT_WINDOW: 'You left the exam window (for example, Alt+Tab to another application).',
     SECOND_MONITOR: 'A second monitor was connected during the exam.',
     PAGE_CLOSED: 'You closed or reloaded the exam page.',
+    NO_FACE: 'Your face was not visible to the camera.',
+    CAMERA_BLOCKED: 'Your camera was covered or blocked.',
+    MULTIPLE_FACES: 'More than one person was in front of the camera.',
+    PHONE_DETECTED: 'A mobile phone was seen on camera.',
+    CAMERA_OFF: 'Your camera was turned off or disconnected.',
   };
 
   function voidExam(event, detail) {
@@ -548,10 +662,19 @@
     showVoid(event);
   }
 
+  function stopCamera() {
+    if (!state.cam.required) return;
+    window.ExamCamera.stop();
+    $('camFloat').hidden = true;
+    $('faceWarnModal').hidden = true;
+    state.cam.warningOpen = false;
+  }
+
   function showVoid(event, serverMessage) {
     state.active = false;
     state.voided = true;
     clearInterval(state.timerId);
+    stopCamera();
     $('confirmModal').hidden = true;
     busy(false);
     $('voidReason').textContent = event ? REASONS[event] : (serverMessage || 'Exam rules were broken.');
@@ -638,6 +761,9 @@
       if (f) f();
     });
     $('nextBtn').addEventListener('click', goNext);
+    $('camBtn').addEventListener('click', turnOnCamera);
+    $('faceWarnOk').addEventListener('click', closeFaceWarning);
+    $('camRestartBtn').addEventListener('click', () => { window.ExamCamera.restart().catch(() => {}); });
     $('prevBtn').addEventListener('click', goPrev);
 
     if (!API_URL || API_URL.indexOf('PASTE_') === 0) {
