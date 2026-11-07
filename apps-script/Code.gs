@@ -114,7 +114,7 @@ const API_ = {
         title: exam.title,
         course: exam.course,
         displayMode: exam.displayMode,
-        faceMonitor: exam.faceMonitor,
+        faceMode: exam.faceMode,
         allowBack: exam.allowBack,
         instructions: exam.instructions,
         questionCount: questions.length,
@@ -215,7 +215,7 @@ const API_ = {
         if (settings.REQUIRE_MONITOR_CHECK && env.monitorCheck !== 'supported') {
           throw apiError_('UNSUPPORTED_BROWSER', 'Please open the exam in Google Chrome or Microsoft Edge on a laptop or desktop computer.');
         }
-        if (exam.faceMonitor && env.camera !== 'ok') {
+        if (exam.faceMode !== 'OFF' && env.camera !== 'ok') {
           throw apiError_('CAMERA_REQUIRED', 'This exam requires your camera. Turn it on and make sure your face is visible.');
         }
 
@@ -449,6 +449,20 @@ function getExamRow_(examId, allowInactive) {
   return row;
 }
 
+/**
+ * Exams → FaceMonitor:
+ *   OFF    – no camera needed
+ *   START  – face must be visible before starting; camera turns off when the exam begins
+ *   ALWAYS – face checked before starting AND monitored during the exam (1 warning, then void)
+ * TRUE (older sheets) means ALWAYS; FALSE / empty means OFF.
+ */
+function parseFaceMode_(v) {
+  if (v === true) return 'ALWAYS';
+  const s = String(v === undefined || v === null ? '' : v).trim().toUpperCase();
+  if (s === 'START' || s === 'ALWAYS') return s;
+  return toBool_(s, false) ? 'ALWAYS' : 'OFF';
+}
+
 function examConfig_(row) {
   const cfg = {
     id: String(row.ExamID).trim(),
@@ -463,7 +477,7 @@ function examConfig_(row) {
     showScore: toBool_(row.ShowScore, true),
     course: String(row.Course || '').trim(),
     displayMode: String(row.DisplayMode || '').trim().toUpperCase() === 'ONE' ? 'ONE' : 'ALL',
-    faceMonitor: toBool_(row.FaceMonitor, false),
+    faceMode: parseFaceMode_(row.FaceMonitor),
   };
   // "No going back" only makes sense when questions are shown one at a time
   cfg.allowBack = cfg.displayMode === 'ONE' ? toBool_(row.AllowBack, true) : true;
@@ -690,7 +704,7 @@ function builderGetData() {
       end: e.end ? Utilities.formatDate(e.end, tz, "yyyy-MM-dd'T'HH:mm") : '',
       limitMin: e.limitMin, shuffleQuestions: e.shuffleQuestions, shuffleChoices: e.shuffleChoices,
       showScore: e.showScore, active: toBool_(r.Active, true), link: examLink_(e.id, settings),
-      displayMode: e.displayMode, allowBack: e.allowBack, faceMonitor: e.faceMonitor,
+      displayMode: e.displayMode, allowBack: e.allowBack, faceMode: e.faceMode,
     };
   });
   return {
@@ -753,7 +767,7 @@ function builderSaveExam(form) {
     Active: form.active !== false,
     Course: asText_(String(form.course || '').trim()),
     DisplayMode: form.displayMode === 'ONE' ? 'ONE' : 'ALL',
-    FaceMonitor: !!form.faceMonitor,
+    FaceMonitor: parseFaceMode_(form.faceMode),
     AllowBack: form.displayMode === 'ONE' ? form.allowBack !== false : true,
   };
   const existing = table.rows.find(r => String(r.ExamID).trim().toLowerCase() === examId.toLowerCase());

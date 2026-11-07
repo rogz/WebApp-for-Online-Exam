@@ -19,7 +19,9 @@ const gas = create(path.join(REPO, 'apps-script/Code.gs'));
 gas.ctx.setupSheets();
 const st = gas.sheet('Settings'); const sh = st.data[0];
 st.data.forEach((r, i) => { if (r[sh.indexOf('Key')] === 'FACE_GRACE_SECONDS') st.set(i + 1, sh.indexOf('Value') + 1, 1); });
-gas.ctx.builderSaveExam({ id: 'CAM', title: 'Camera quiz', questionIds: ['Q001', 'Q003'], start: '', end: '', limitMin: 10, showScore: true, active: true, faceMonitor: true });
+gas.ctx.builderSaveExam({ id: 'CAM', title: 'Camera quiz', questionIds: ['Q001', 'Q003'], start: '', end: '', limitMin: 10, showScore: true, active: true, faceMode: 'ALWAYS' });
+gas.ctx.builderSaveExam({ id: 'CAM-START', title: 'Start check quiz', questionIds: ['Q001', 'Q003'], start: '', end: '', limitMin: 10, showScore: true, active: true, faceMode: 'START' });
+gas.ctx.builderSaveExam({ id: 'CAM-OFF', title: 'No camera quiz', questionIds: ['Q001', 'Q003'], start: '', end: '', limitMin: 10, showScore: true, active: true, faceMode: 'OFF' });
 
 let failures = 0;
 const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) failures++; };
@@ -79,7 +81,7 @@ const serveFile = (route, file) => route.fulfill({ body: fs.readFileSync(file), 
     };
   });
   const errors = [];
-  const open = async () => { const p = await ctx.newPage(); p.on('pageerror', e => errors.push(e.message)); await p.goto('http://localhost:8124/?exam=CAM'); await p.waitForSelector('#screen-rules:not([hidden])'); return p; };
+  const open = async (exam = 'CAM') => { const p = await ctx.newPage(); p.on('pageerror', e => errors.push(e.message)); await p.goto('http://localhost:8124/?exam=' + exam); await p.waitForSelector('#screen-rules:not([hidden])'); return p; };
   const setCam = (p, v) => p.evaluate(v => { window.__cam = v; }, v);
   const camCheck = p => p.textContent('#checkCamera');
 
@@ -162,6 +164,37 @@ const serveFile = (route, file) => route.fulfill({ body: fs.readFileSync(file), 
   ok(gas.call({ action: 'violation', attemptId: s3.attemptId, event: 'PHONE_DETECTED', detail: 'x' }).status === 'VOIDED', '2nd phone = void');
   const s4 = gas.call({ action: 'start', examId: 'CAM', studentId: 'C4', name: 'x', env: { monitorCheck: 'supported', camera: 'ok' } });
   ok(gas.call({ action: 'violation', attemptId: s4.attemptId, event: 'TAB_SWITCH' }).status === 'VOIDED', 'tab switch still voids at once');
+
+  // Face check at the start only
+  p = await open('CAM-START');
+  ok((await p.textContent('#ruleCamera')).includes('before you can start') && !(await p.textContent('#ruleCamera')).includes('warning'), 'start-only rule text');
+  await setCam(p, 'face');
+  await p.fill('#studentId', 'S1'); await p.fill('#studentName', 'Start Only'); await p.check('#agree');
+  ok(await p.isDisabled('#startBtn'), 'start-only: camera needed to start');
+  await p.click('#camBtn');
+  await p.waitForFunction(() => document.querySelector('#checkCamera').className === 'ok', null, { timeout: 60000 });
+  await p.click('#startBtn');
+  await p.waitForSelector('#screen-exam:not([hidden])');
+  ok(await p.isHidden('#camFloat'), 'start-only: no camera preview during exam');
+  ok(await p.evaluate(() => window.ExamCamera.status()) === 'OFF', 'start-only: camera turned off after start');
+  await setCam(p, 'none');
+  await sleep(2500);
+  ok(await p.isHidden('#faceWarnModal') && await p.isHidden('#voidModal'), 'start-only: no warnings during exam');
+  await p.close();
+
+  // No camera at all
+  p = await open('CAM-OFF');
+  ok(await p.isHidden('#cameraPanel') && await p.isHidden('#ruleCamera') && await p.isHidden('#checkCamera'), 'off: no camera UI');
+  await p.fill('#studentId', 'O1'); await p.fill('#studentName', 'No Cam'); await p.check('#agree');
+  ok(!(await p.isDisabled('#startBtn')), 'off: can start without camera');
+  await p.click('#startBtn');
+  await p.waitForSelector('#screen-exam:not([hidden])');
+  ok(true, 'off: exam started without camera');
+  await p.close();
+
+  // Older sheets: FaceMonitor TRUE means monitor always
+  ok(gas.ctx.parseFaceMode_(true) === 'ALWAYS' && gas.ctx.parseFaceMode_('TRUE') === 'ALWAYS' && gas.ctx.parseFaceMode_('') === 'OFF' && gas.ctx.parseFaceMode_('start') === 'START', 'FaceMonitor values parsed');
+  ok(gas.sheet('Exams').objects().find(e => e.ExamID === 'CAM-START').FaceMonitor === 'START', 'sheet stores START');
 
   ok(errors.length === 0, 'no page errors ' + errors.join(' | '));
   await browser.close(); server.close();

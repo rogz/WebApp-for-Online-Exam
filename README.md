@@ -15,7 +15,7 @@ A free online exam system that needs **no database and no paid server**:
 | Question bank | Teachers pick questions in an **Exam Builder** window inside Google Sheets |
 | Rules screen | Before starting, students are told that switching tabs voids the exam and that a second monitor must be disconnected. They must tick "I agree". |
 | System check | **Start** stays disabled while a second monitor is connected |
-| Camera monitoring | Optional per exam. The student's face must be visible before they can start. During the exam, a hidden face, a covered camera, a second person, a phone, or the camera turning off gives **one warning**, and **the second time voids the exam**. Video is checked in the browser only: nothing is recorded or uploaded. |
+| Camera monitoring | Optional per exam: **not required**, **face check at the start only**, or **monitored during the whole exam**. The student's face must be visible before they can start. With full monitoring, during the exam a hidden face, a covered camera, a second person, a phone, or the camera turning off gives **one warning**, and **the second time voids the exam**. Video is checked in the browser only: nothing is recorded or uploaded. |
 | Anti-cheating | Switching tabs, minimizing, Alt+Tab, leaving or reloading the page, or plugging in a monitor mid-exam **voids the exam immediately**. A pop-up tells the student to inform their instructor. |
 | Time | Per-exam **time window** (opens/closes) and **time limit** (auto-submits when time is up) |
 | Retakes | The instructor can let a voided (or finished) student take the exam again |
@@ -78,7 +78,7 @@ Use **Exam Admin → Check question bank for errors** to catch mistakes. You can
   - *All questions on one page*: students scroll and can change any answer until they submit.
   - *One question at a time*: Next / Previous buttons plus numbered buttons to jump between questions.
     - Untick **Allow going back** to make it forward-only. There is no Previous button, and each answer is **locked on the server** when the student clicks Next, saved in the `Progress` sheet. Students are warned before skipping an unanswered question.
-- **Require camera**: turns on face and obstruction monitoring for that exam (see below).
+- **Camera / face check**: *Not required*, *Check face at the start only*, or *Monitor face during the whole exam* (see below).
 - Options: shuffle questions, shuffle choices, show the score after submitting, active.
 - Click **Save exam**, then **Copy student link**.
 
@@ -117,7 +117,15 @@ If the Roster is empty, anyone with an exam link can take it. If you fill it in,
 - The **Attempts** sheet records the course of each attempt, so you can filter results by course.
 
 ### Camera monitoring
-Tick **Require camera** in the Exam Builder. Then:
+In the Exam Builder, choose **Camera / face check**:
+
+| Option | Before starting | During the exam |
+|---|---|---|
+| **Not required** | No camera | No camera |
+| **Check face at the start only** | Face must be visible to unlock Start | Camera turns off |
+| **Monitor face during the whole exam** | Face must be visible to unlock Start | Monitored: 1 warning, then void |
+
+With **Monitor face during the whole exam**:
 - On the rules screen, students click **Turn on camera**. **Start exam** stays disabled until exactly one face is clearly visible.
 - During the exam, a small camera preview stays in the corner. Each of these counts as an offense if it lasts longer than `FACE_GRACE_SECONDS` (default 3 s):
   - the face is not visible (covered, turned away, or left the seat)

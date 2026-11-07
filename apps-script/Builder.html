@@ -60,7 +60,12 @@
       <option value="ONE">One question at a time</option>
     </select>
     <label class="check" id="allowBackWrap"><input type="checkbox" id="allowBack" checked> Allow going back to previous questions</label>
-    <label class="check"><input type="checkbox" id="faceMonitor" checked> Require camera — monitor face &amp; obstructions (1 warning, then void)</label>
+    <label for="faceMode">Camera / face check</label>
+    <select id="faceMode">
+      <option value="OFF">Not required</option>
+      <option value="START">Check face at the start only</option>
+      <option value="ALWAYS">Monitor face during the whole exam (1 warning, then void)</option>
+    </select>
     <label class="check"><input type="checkbox" id="shuffleQuestions" checked> Shuffle question order</label>
     <label class="check"><input type="checkbox" id="shuffleChoices" checked> Shuffle multiple-choice options</label>
     <label class="check"><input type="checkbox" id="showScore" checked> Show score to students after submitting</label>
@@ -178,7 +183,7 @@
       return '<div class="exam-item"><b>' + esc(e.title) + '</b> <span class="muted">' + esc(e.id) + (e.course ? ' · ' + esc(e.course) : '') + (e.active ? '' : ' · inactive') + '</span>' +
         '<div class="muted">' + e.questionIds.length + ' questions · ' + (e.limitMin ? e.limitMin + ' min' : 'no limit') +
         (e.displayMode === 'ONE' ? ' · one at a time' + (e.allowBack ? '' : ', no going back') : '') +
-        (e.faceMonitor ? ' · 📷 camera' : '') +
+        (e.faceMode === 'ALWAYS' ? ' · 📷 camera monitored' : e.faceMode === 'START' ? ' · 📷 face check at start' : '') +
         (e.start ? ' · opens ' + esc(e.start.replace('T', ' ')) : '') + (e.end ? ' · closes ' + esc(e.end.replace('T', ' ')) : '') + '</div>' +
         '<div class="actions"><button onclick="editExam(' + i + ')">Edit</button>' +
         (e.link ? '<button onclick="copyLink(' + i + ')">Copy student link</button>' : '<span class="muted">Set STUDENT_APP_URL in Settings to get a link</span>') +
@@ -195,7 +200,7 @@
     $('limit').value = e.limitMin; $('shuffleQuestions').checked = e.shuffleQuestions;
     $('shuffleChoices').checked = e.shuffleChoices; $('showScore').checked = e.showScore; $('active').checked = e.active;
     $('displayMode').value = e.displayMode || 'ALL'; $('allowBack').checked = e.allowBack !== false; syncNav();
-    $('faceMonitor').checked = !!e.faceMonitor;
+    $('faceMode').value = e.faceMode || 'OFF';
     selected = {}; selectedOrder = [];
     e.questionIds.forEach(function (id) { selected[id] = true; selectedOrder.push(id); });
     hideMsg(); renderBank();
@@ -208,7 +213,8 @@
     $('examId').disabled = false;
     $('start').value = DATA ? DATA.now : '';
     $('limit').value = 30;
-    ['shuffleQuestions', 'shuffleChoices', 'showScore', 'active', 'allowBack', 'faceMonitor'].forEach(function (id) { $(id).checked = true; });
+    ['shuffleQuestions', 'shuffleChoices', 'showScore', 'active', 'allowBack'].forEach(function (id) { $(id).checked = true; });
+    $('faceMode').value = 'ALWAYS';
     $('displayMode').value = 'ALL'; syncNav();
     selected = {}; selectedOrder = [];
     hideMsg(); if (DATA) renderBank();
@@ -220,7 +226,7 @@
       start: $('start').value, end: $('end').value, limitMin: $('limit').value,
       shuffleQuestions: $('shuffleQuestions').checked, shuffleChoices: $('shuffleChoices').checked,
       showScore: $('showScore').checked, active: $('active').checked, questionIds: selectedOrder.slice(),
-      displayMode: $('displayMode').value, allowBack: $('allowBack').checked, faceMonitor: $('faceMonitor').checked
+      displayMode: $('displayMode').value, allowBack: $('allowBack').checked, faceMode: $('faceMode').value
     };
     $('saveBtn').disabled = true;
     google.script.run.withSuccessHandler(function (r) {

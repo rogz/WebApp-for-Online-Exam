@@ -28,7 +28,7 @@
     allowBack: true,     // may return to earlier questions (one-at-a-time mode)
     index: 0,            // current question in one-at-a-time mode
     locked: new Set(),   // questions that can no longer be changed
-    cam: { required: false, warnings: 0, warningOpen: false, offenseArmed: true },
+    cam: { required: false, continuous: false, warnings: 0, warningOpen: false, offenseArmed: true },
   };
 
   // ───────── API ─────────
@@ -179,7 +179,7 @@
       $('camRestartBtn').hidden = st !== 'CAMERA_OFF';
       return;
     }
-    if (!state.active || !state.cam.required) return;
+    if (!state.active || !state.cam.continuous) return;
     if (st === 'OK') { state.cam.offenseArmed = true; return; }
     if (st === 'LOADING' || st === 'OFF' || !state.cam.offenseArmed) return;
     const graceMs = st === 'CAMERA_OFF' ? 0 : Math.max(1, state.rules.faceGraceSeconds || 3) * 1000;
@@ -255,13 +255,20 @@
     $('factWindow').textContent = (exam.startText ? 'From ' + exam.startText : 'Now') + (exam.endText ? ' until ' + exam.endText : '');
     $('accessCodeWrap').hidden = !state.info.requiresAccessCode;
     $('rulePaste').hidden = !rules.blockCopyPaste;
-    state.cam.required = !!exam.faceMonitor;
+    state.cam.required = exam.faceMode === 'START' || exam.faceMode === 'ALWAYS';
+    state.cam.continuous = exam.faceMode === 'ALWAYS';
     $('ruleCamera').hidden = !state.cam.required;
     $('checkCamera').hidden = !state.cam.required;
     $('cameraPanel').hidden = !state.cam.required;
-    if (state.cam.required) {
+    if (state.cam.continuous) {
+      $('ruleCamera').innerHTML = '📷 <b>Your camera will be monitored throughout the exam.</b> Keep your face clearly visible. ' +
+        'If your face is hidden, the camera is covered, another person appears, or a phone is seen, you get <b>one warning</b>. ' +
+        'The second time, <b>your exam is voided</b>.';
       $('agreeText').textContent = 'I have read the rules. I understand that switching tabs or windows or using a second monitor will void my exam, ' +
         'and that my camera is monitored: I get one warning, and a second camera problem will void my exam.';
+    } else if (state.cam.required) {
+      $('ruleCamera').innerHTML = '📷 <b>Your face must be visible to the camera before you can start.</b> Sit facing the screen in a well-lit place, with only you in view.';
+      $('camHelp').textContent = 'Turn on your camera so we can check that your face is visible. The camera turns off when the exam starts.';
     }
     const nav = $('ruleNav');
     if (exam.displayMode === 'ONE') {
@@ -343,7 +350,9 @@
     if (state.oneAtATime) setupPager();
     if (state.rules.blockCopyPaste) document.body.classList.add('locked');
     state.active = true;
-    if (state.cam.required) {
+    if (state.cam.required && !state.cam.continuous) {
+      window.ExamCamera.stop(); // face was checked at the start only
+    } else if (state.cam.continuous) {
       $('camFloat').appendChild($('camBox')); // moving the element pauses it, so resume
       $('camFloat').hidden = false;
       window.ExamCamera.resume();
