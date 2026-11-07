@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; }
+  body { font: 13px/1.4 Arial, Helvetica, sans-serif; color: #202124; margin: 0; }
+  .wrap { display: grid; grid-template-columns: 330px 1fr; gap: 16px; height: 640px; }
+  .panel { overflow: auto; padding-right: 4px; }
+  h3 { margin: 4px 0 8px; font-size: 14px; }
+  label { display: block; margin: 8px 0 3px; font-weight: bold; font-size: 12px; }
+  input[type=text], input[type=number], input[type=datetime-local], textarea, select {
+    width: 100%; padding: 6px; border: 1px solid #c4c7c5; border-radius: 4px; font: inherit;
+  }
+  textarea { height: 60px; resize: vertical; }
+  .row { display: flex; gap: 8px; } .row > div { flex: 1; }
+  .check { font-weight: normal; display: flex; gap: 6px; align-items: center; margin: 6px 0; }
+  button { padding: 7px 12px; border-radius: 4px; border: 1px solid #c4c7c5; background: #fff; cursor: pointer; font: inherit; }
+  button.primary { background: #1a73e8; color: #fff; border-color: #1a73e8; font-weight: bold; }
+  button:disabled { opacity: .5; cursor: default; }
+  .muted { color: #5f6368; font-size: 12px; }
+  .filters { display: flex; gap: 6px; margin-bottom: 6px; }
+  .filters > * { flex: 1; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid #eee; vertical-align: top; }
+  th { position: sticky; top: 0; background: #f1f3f4; font-size: 12px; }
+  tr.bad td { background: #fdecea; }
+  .tag { display: inline-block; padding: 0 6px; border-radius: 9px; font-size: 11px; background: #e8f0fe; color: #1a56c4; font-weight: bold; }
+  .msg { margin-top: 10px; padding: 8px; border-radius: 4px; display: none; word-break: break-all; }
+  .msg.ok { display: block; background: #e6f4ea; color: #137333; }
+  .msg.err { display: block; background: #fce8e6; color: #c5221f; }
+  .exam-item { border: 1px solid #e0e0e0; border-radius: 4px; padding: 6px 8px; margin-bottom: 6px; }
+  .exam-item .actions { margin-top: 4px; display: flex; gap: 6px; }
+  .exam-item button { padding: 3px 8px; font-size: 12px; }
+  .summary { position: sticky; bottom: 0; background: #fff; padding: 6px 0; border-top: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="panel">
+    <h3 id="formTitle">New exam</h3>
+    <label for="title">Title</label>
+    <input type="text" id="title" placeholder="e.g. Science Quiz 1">
+    <label for="examId">Exam ID <span class="muted">(optional, used in the link)</span></label>
+    <input type="text" id="examId" placeholder="e.g. SCI-Q1">
+    <label for="instructions">Instructions for students</label>
+    <textarea id="instructions"></textarea>
+    <div class="row">
+      <div><label for="start">Opens</label><input type="datetime-local" id="start"></div>
+      <div><label for="end">Closes</label><input type="datetime-local" id="end"></div>
+    </div>
+    <div class="muted" id="tzNote"></div>
+    <label for="limit">Time limit (minutes, 0 = until the exam closes)</label>
+    <input type="number" id="limit" min="0" value="30">
+    <label class="check"><input type="checkbox" id="shuffleQuestions" checked> Shuffle question order</label>
+    <label class="check"><input type="checkbox" id="shuffleChoices" checked> Shuffle multiple-choice options</label>
+    <label class="check"><input type="checkbox" id="showScore" checked> Show score to students after submitting</label>
+    <label class="check"><input type="checkbox" id="active" checked> Active (students can open it)</label>
+    <div class="row" style="margin-top:10px">
+      <button class="primary" id="saveBtn" onclick="save()">Save exam</button>
+      <button onclick="resetForm()">Clear</button>
+    </div>
+    <div id="msg" class="msg"></div>
+
+    <h3 style="margin-top:18px">Existing exams</h3>
+    <div id="examList" class="muted">Loading…</div>
+  </div>
+
+  <div class="panel">
+    <h3>Question bank <span class="muted">— tick the questions for this exam</span></h3>
+    <div class="filters">
+      <input type="text" id="search" placeholder="Search text or ID…" oninput="renderBank()">
+      <select id="typeFilter" onchange="renderBank()">
+        <option value="">All types</option>
+        <option value="MC">Multiple choice</option>
+        <option value="TF">True / False</option>
+        <option value="FIB">Fill in the blank</option>
+        <option value="ESSAY">Essay</option>
+      </select>
+      <select id="topicFilter" onchange="renderBank()"><option value="">All topics</option></select>
+    </div>
+    <table>
+      <thead><tr>
+        <th style="width:28px"><input type="checkbox" id="checkAll" title="Select all shown" onchange="toggleAll(this.checked)"></th>
+        <th style="width:60px">ID</th><th style="width:60px">Type</th><th>Question</th><th style="width:40px">Pts</th><th style="width:80px">Topic</th>
+      </tr></thead>
+      <tbody id="bank"><tr><td colspan="6" class="muted">Loading…</td></tr></tbody>
+    </table>
+    <div class="summary"><span id="selSummary">0 selected</span><span class="muted">Add or edit questions in the "Questions" sheet, then reopen this window.</span></div>
+  </div>
+</div>
+
+<script>
+  var DATA = null;
+  var selected = {};      // id -> true
+  var selectedOrder = []; // keeps the order the teacher picked
+  var editing = false;
+  var TYPE_LABEL = { MC: 'MC', TF: 'T/F', FIB: 'Blank', ESSAY: 'Essay' };
+
+  function $(id) { return document.getElementById(id); }
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+
+  function load() {
+    google.script.run.withSuccessHandler(function (d) {
+      DATA = d;
+      $('tzNote').textContent = 'Times are in the spreadsheet time zone: ' + d.timeZone;
+      var topics = {};
+      d.questions.forEach(function (q) { if (q.topic) topics[q.topic] = true; });
+      $('topicFilter').innerHTML = '<option value="">All topics</option>' +
+        Object.keys(topics).sort().map(function (t) { return '<option>' + esc(t) + '</option>'; }).join('');
+      if (!editing) resetForm();
+      renderBank();
+      renderExams();
+    }).withFailureHandler(showErr).builderGetData();
+  }
+
+  function visibleQuestions() {
+    var s = $('search').value.trim().toLowerCase(), t = $('typeFilter').value, tp = $('topicFilter').value;
+    return DATA.questions.filter(function (q) {
+      return (!t || q.type === t) && (!tp || q.topic === tp) &&
+        (!s || q.id.toLowerCase().indexOf(s) !== -1 || q.text.toLowerCase().indexOf(s) !== -1);
+    });
+  }
+
+  function renderBank() {
+    if (!DATA) return;
+    var qs = visibleQuestions();
+    $('bank').innerHTML = qs.length ? qs.map(function (q) {
+      var bad = q.problems.length > 0;
+      var extra = q.type === 'MC' ? '<div class="muted">' + q.choices.map(function (c, i) { return String.fromCharCode(65 + i) + '. ' + esc(c); }).join(' &nbsp; ') + '</div>' : '';
+      return '<tr class="' + (bad ? 'bad' : '') + '"><td><input type="checkbox" ' + (selected[q.id] ? 'checked ' : '') + (bad ? 'disabled ' : '') +
+        'data-id="' + esc(q.id) + '" onchange="toggle(this.getAttribute(\'data-id\'), this.checked)"></td><td>' + esc(q.id) + '</td><td><span class="tag">' +
+        esc(TYPE_LABEL[q.type] || q.type) + '</span></td><td>' + esc(q.text) + extra +
+        (bad ? '<div style="color:#c5221f">⚠ ' + esc(q.problems.join('; ')) + '</div>' : '') +
+        '</td><td>' + q.points + '</td><td>' + esc(q.topic) + '</td></tr>';
+    }).join('') : '<tr><td colspan="6" class="muted">No questions match.</td></tr>';
+    updateSummary();
+  }
+
+  function toggle(id, on) {
+    if (on && !selected[id]) { selected[id] = true; selectedOrder.push(id); }
+    if (!on && selected[id]) { delete selected[id]; selectedOrder = selectedOrder.filter(function (x) { return x !== id; }); }
+    updateSummary();
+  }
+
+  function toggleAll(on) {
+    visibleQuestions().forEach(function (q) { if (!q.problems.length) toggle(q.id, on); });
+    renderBank();
+  }
+
+  function updateSummary() {
+    var byId = {}; DATA.questions.forEach(function (q) { byId[q.id] = q; });
+    var counts = {}, pts = 0;
+    selectedOrder.forEach(function (id) { var q = byId[id]; if (!q) return; counts[q.type] = (counts[q.type] || 0) + 1; pts += q.points; });
+    var parts = Object.keys(counts).map(function (k) { return counts[k] + ' ' + (TYPE_LABEL[k] || k); });
+    $('selSummary').textContent = selectedOrder.length + ' selected' + (parts.length ? ' (' + parts.join(', ') + ')' : '') + ' — ' + pts + ' points';
+  }
+
+  function renderExams() {
+    if (!DATA.exams.length) { $('examList').textContent = 'No exams yet.'; return; }
+    $('examList').innerHTML = DATA.exams.map(function (e, i) {
+      return '<div class="exam-item"><b>' + esc(e.title) + '</b> <span class="muted">' + esc(e.id) + (e.active ? '' : ' · inactive') + '</span>' +
+        '<div class="muted">' + e.questionIds.length + ' questions · ' + (e.limitMin ? e.limitMin + ' min' : 'no limit') +
+        (e.start ? ' · opens ' + esc(e.start.replace('T', ' ')) : '') + (e.end ? ' · closes ' + esc(e.end.replace('T', ' ')) : '') + '</div>' +
+        '<div class="actions"><button onclick="editExam(' + i + ')">Edit</button>' +
+        (e.link ? '<button onclick="copyLink(' + i + ')">Copy student link</button>' : '<span class="muted">Set STUDENT_APP_URL in Settings to get a link</span>') +
+        '</div></div>';
+    }).join('');
+  }
+
+  function editExam(i) {
+    var e = DATA.exams[i];
+    editing = true;
+    $('formTitle').textContent = 'Edit exam: ' + e.id;
+    $('title').value = e.title; $('examId').value = e.id; $('examId').disabled = true;
+    $('instructions').value = e.instructions; $('start').value = e.start; $('end').value = e.end;
+    $('limit').value = e.limitMin; $('shuffleQuestions').checked = e.shuffleQuestions;
+    $('shuffleChoices').checked = e.shuffleChoices; $('showScore').checked = e.showScore; $('active').checked = e.active;
+    selected = {}; selectedOrder = [];
+    e.questionIds.forEach(function (id) { selected[id] = true; selectedOrder.push(id); });
+    hideMsg(); renderBank();
+  }
+
+  function resetForm() {
+    editing = false;
+    $('formTitle').textContent = 'New exam';
+    ['title', 'examId', 'instructions', 'end'].forEach(function (id) { $(id).value = ''; });
+    $('examId').disabled = false;
+    $('start').value = DATA ? DATA.now : '';
+    $('limit').value = 30;
+    ['shuffleQuestions', 'shuffleChoices', 'showScore', 'active'].forEach(function (id) { $(id).checked = true; });
+    selected = {}; selectedOrder = [];
+    hideMsg(); if (DATA) renderBank();
+  }
+
+  function save() {
+    var form = {
+      editing: editing, id: $('examId').value, title: $('title').value, instructions: $('instructions').value,
+      start: $('start').value, end: $('end').value, limitMin: $('limit').value,
+      shuffleQuestions: $('shuffleQuestions').checked, shuffleChoices: $('shuffleChoices').checked,
+      showScore: $('showScore').checked, active: $('active').checked, questionIds: selectedOrder.slice()
+    };
+    $('saveBtn').disabled = true;
+    google.script.run.withSuccessHandler(function (r) {
+      $('saveBtn').disabled = false;
+      showOk('Saved exam ' + r.id + '.' + (r.link ? ' Student link: ' + r.link : ' Set STUDENT_APP_URL in the Settings sheet to get the student link.'));
+      editing = true; $('examId').value = r.id; $('examId').disabled = true; $('formTitle').textContent = 'Edit exam: ' + r.id;
+      google.script.run.withSuccessHandler(function (d) { DATA = d; renderExams(); }).builderGetData();
+    }).withFailureHandler(function (err) { $('saveBtn').disabled = false; showErr(err); }).builderSaveExam(form);
+  }
+
+  function copyLink(i) {
+    var link = DATA.exams[i].link;
+    var ta = document.createElement('textarea'); ta.value = link; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); showOk('Copied: ' + link); } catch (e) { showOk(link); }
+    document.body.removeChild(ta);
+  }
+
+  function showOk(t) { var m = $('msg'); m.className = 'msg ok'; m.textContent = t; }
+  function showErr(e) { var m = $('msg'); m.className = 'msg err'; m.textContent = (e && e.message) || String(e); }
+  function hideMsg() { $('msg').className = 'msg'; }
+
+  load();
+</script>
+</body>
+</html>
