@@ -32,11 +32,11 @@ const SHEET = {
 const HEADERS = {
   Questions: ['QuestionID', 'Type', 'Question', 'Choices', 'Answer', 'Points', 'Topic'],
   Exams: ['ExamID', 'Title', 'Instructions', 'QuestionIDs', 'StartDateTime', 'EndDateTime',
-    'TimeLimitMinutes', 'ShuffleQuestions', 'ShuffleChoices', 'ShowScore', 'Active'],
-  Roster: ['StudentID', 'Name', 'Email', 'AccessCode'],
+    'TimeLimitMinutes', 'ShuffleQuestions', 'ShuffleChoices', 'ShowScore', 'Active', 'Course'],
+  Roster: ['StudentID', 'Name', 'Email', 'AccessCode', 'Courses'],
   Attempts: ['AttemptID', 'ExamID', 'StudentID', 'Name', 'Status', 'StartedAt', 'Deadline',
     'SubmittedAt', 'Score', 'MaxScore', 'Percent', 'PendingEssays', 'Late', 'VoidReason',
-    'VoidedAt', 'AllowRetake', 'IsRetake', 'UserAgent'],
+    'VoidedAt', 'AllowRetake', 'IsRetake', 'UserAgent', 'Course'],
   Responses: ['AttemptID', 'ExamID', 'StudentID', 'QuestionID', 'Type', 'Question',
     'StudentAnswer', 'CorrectAnswer', 'IsCorrect', 'PointsEarned', 'MaxPoints'],
   Violations: ['Timestamp', 'AttemptID', 'ExamID', 'StudentID', 'Name', 'Event', 'Detail'],
@@ -99,6 +99,7 @@ const API_ = {
       exam: {
         id: exam.id,
         title: exam.title,
+        course: exam.course,
         instructions: exam.instructions,
         questionCount: questions.length,
         totalPoints: sum_(questions.map(q => q.points)),
@@ -145,6 +146,10 @@ const API_ = {
         const code = String(r.AccessCode).trim();
         if (code && code !== String(req.accessCode || '').trim()) {
           throw apiError_('BAD_ACCESS_CODE', 'The access code is incorrect.');
+        }
+        if (exam.course && !parseCourses_(r.Courses).some(c => c === normCourse_(exam.course))) {
+          throw apiError_('NOT_ENROLLED', 'You are not enrolled in ' + exam.course + ', so you cannot take this exam. ' +
+            'Check that you opened the right exam link, or contact your instructor.');
         }
         if (String(r.Name).trim()) name = String(r.Name).trim();
         studentId = String(r.StudentID).trim();
@@ -215,6 +220,7 @@ const API_ = {
           AllowRetake: false,
           IsRetake: isRetake,
           UserAgent: asText_(String(env.userAgent || '').slice(0, 300)),
+          Course: asText_(exam.course),
         };
         appendObj_(attempts, attempt, ['AllowRetake']);
       }
@@ -404,6 +410,7 @@ function examConfig_(row) {
     shuffleQuestions: toBool_(row.ShuffleQuestions, false),
     shuffleChoices: toBool_(row.ShuffleChoices, false),
     showScore: toBool_(row.ShowScore, true),
+    course: String(row.Course || '').trim(),
   };
 }
 
@@ -612,7 +619,7 @@ function builderGetData() {
   const exams = readTable_(SHEET.EXAMS).rows.filter(r => String(r.ExamID).trim()).map(r => {
     const e = examConfig_(r);
     return {
-      id: e.id, title: e.title, instructions: e.instructions, questionIds: e.questionIds,
+      id: e.id, title: e.title, course: e.course, instructions: e.instructions, questionIds: e.questionIds,
       start: e.start ? Utilities.formatDate(e.start, tz, "yyyy-MM-dd'T'HH:mm") : '',
       end: e.end ? Utilities.formatDate(e.end, tz, "yyyy-MM-dd'T'HH:mm") : '',
       limitMin: e.limitMin, shuffleQuestions: e.shuffleQuestions, shuffleChoices: e.shuffleChoices,
@@ -628,7 +635,17 @@ function builderGetData() {
       return { id: q.id, type: q.type || q.rawType, text: q.text, choices: q.choices, points: q.points, topic: q.topic, problems: validateQuestion_(q) };
     }),
     exams: exams,
+    courses: knownCourses_(),
   };
+}
+
+/** Course codes used in the Roster and in Exams, for the Builder's dropdown. */
+function knownCourses_() {
+  const seen = {};
+  const add = c => { const k = normCourse_(c); if (k && !seen[k]) seen[k] = String(c).trim(); };
+  readTable_(SHEET.ROSTER).rows.forEach(r => String(r.Courses || '').split(/[,;\n]+/).forEach(add));
+  readTable_(SHEET.EXAMS).rows.forEach(r => add(r.Course || ''));
+  return Object.keys(seen).sort().map(k => seen[k]);
 }
 
 /** Called by Builder.html — creates or updates an exam row. */
@@ -667,6 +684,7 @@ function builderSaveExam(form) {
     ShuffleChoices: !!form.shuffleChoices,
     ShowScore: !!form.showScore,
     Active: form.active !== false,
+    Course: asText_(String(form.course || '').trim()),
   };
   const existing = table.rows.find(r => String(r.ExamID).trim().toLowerCase() === examId.toLowerCase());
   if (existing) {
@@ -675,7 +693,16 @@ function builderSaveExam(form) {
   } else {
     appendObj_(table, fields);
   }
-  return { id: examId, link: examLink_(examId, getSettings_()) };
+  // Warn (but still save) when nobody on the Roster is enrolled in this course
+  let warning = '';
+  const course = normCourse_(form.course || '');
+  const roster = readTable_(SHEET.ROSTER).rows.filter(r => String(r.StudentID).trim() !== '');
+  if (course && roster.length) {
+    const n = roster.filter(r => parseCourses_(r.Courses).indexOf(course) !== -1).length;
+    if (!n) warning = 'No student in the Roster has "' + String(form.course).trim() + '" in their Courses column, so nobody can take this exam yet.';
+  }
+  if (course && !roster.length) warning = 'The Roster is empty, so anyone with the link can take this exam. Fill in the Roster to limit it to ' + String(form.course).trim() + ' students.';
+  return { id: examId, link: examLink_(examId, getSettings_()), warning: warning };
 }
 
 function showExamLinks() {
@@ -684,7 +711,7 @@ function showExamLinks() {
   const items = rows.map(r => {
     const id = String(r.ExamID).trim();
     const link = examLink_(id, settings);
-    return '<li><b>' + esc_(r.Title || id) + '</b> <small>(' + esc_(id) + (toBool_(r.Active, true) ? '' : ', inactive') + ')</small><br>' +
+    return '<li><b>' + esc_(r.Title || id) + '</b> <small>(' + esc_(id) + (String(r.Course || '').trim() ? ', ' + esc_(r.Course) : '') + (toBool_(r.Active, true) ? '' : ', inactive') + ')</small><br>' +
       (link ? '<input style="width:100%" readonly onclick="this.select()" value="' + esc_(link) + '">' : '<i>Set STUDENT_APP_URL in the Settings sheet first.</i>') + '</li>';
   }).join('');
   const html = '<div style="font:14px Arial,sans-serif"><p>Copy a link and post it in Google Classroom (Classwork → Create → Assignment → Add → Link).</p><ul style="padding-left:18px;line-height:1.6">' +
@@ -873,6 +900,12 @@ function asText_(v) {
 
 /** Leading zeros and case don't matter when matching student IDs. */
 function normId_(v) { return String(v).trim().toLowerCase().replace(/^0+(?=\d)/, ''); }
+
+/** "MATH 101" and "math101" count as the same course. */
+function normCourse_(v) { return String(v || '').trim().toUpperCase().replace(/\s+/g, ''); }
+
+/** A Roster "Courses" cell like "MATH101, SCI201" → ['MATH101', 'SCI201'] */
+function parseCourses_(v) { return String(v || '').split(/[,;\n]+/).map(normCourse_).filter(Boolean); }
 
 function parseIdList_(v) { return String(v || '').split(/[,;\n]+/).map(s => s.trim()).filter(Boolean); }
 

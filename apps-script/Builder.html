@@ -44,6 +44,9 @@
     <input type="text" id="title" placeholder="e.g. Science Quiz 1">
     <label for="examId">Exam ID <span class="muted">(optional, used in the link)</span></label>
     <input type="text" id="examId" placeholder="e.g. SCI-Q1">
+    <label for="course">Course <span class="muted">(only students enrolled in it can take the exam)</span></label>
+    <input type="text" id="course" list="courseList" placeholder="e.g. MATH101 — leave empty for everyone on the Roster">
+    <datalist id="courseList"></datalist>
     <label for="instructions">Instructions for students</label>
     <textarea id="instructions"></textarea>
     <div class="row">
@@ -109,6 +112,7 @@
       d.questions.forEach(function (q) { if (q.topic) topics[q.topic] = true; });
       $('topicFilter').innerHTML = '<option value="">All topics</option>' +
         Object.keys(topics).sort().map(function (t) { return '<option>' + esc(t) + '</option>'; }).join('');
+      $('courseList').innerHTML = (d.courses || []).map(function (c) { return '<option value="' + esc(c) + '">'; }).join('');
       if (!editing) resetForm();
       renderBank();
       renderExams();
@@ -160,7 +164,7 @@
   function renderExams() {
     if (!DATA.exams.length) { $('examList').textContent = 'No exams yet.'; return; }
     $('examList').innerHTML = DATA.exams.map(function (e, i) {
-      return '<div class="exam-item"><b>' + esc(e.title) + '</b> <span class="muted">' + esc(e.id) + (e.active ? '' : ' · inactive') + '</span>' +
+      return '<div class="exam-item"><b>' + esc(e.title) + '</b> <span class="muted">' + esc(e.id) + (e.course ? ' · ' + esc(e.course) : '') + (e.active ? '' : ' · inactive') + '</span>' +
         '<div class="muted">' + e.questionIds.length + ' questions · ' + (e.limitMin ? e.limitMin + ' min' : 'no limit') +
         (e.start ? ' · opens ' + esc(e.start.replace('T', ' ')) : '') + (e.end ? ' · closes ' + esc(e.end.replace('T', ' ')) : '') + '</div>' +
         '<div class="actions"><button onclick="editExam(' + i + ')">Edit</button>' +
@@ -173,7 +177,7 @@
     var e = DATA.exams[i];
     editing = true;
     $('formTitle').textContent = 'Edit exam: ' + e.id;
-    $('title').value = e.title; $('examId').value = e.id; $('examId').disabled = true;
+    $('title').value = e.title; $('examId').value = e.id; $('examId').disabled = true; $('course').value = e.course || '';
     $('instructions').value = e.instructions; $('start').value = e.start; $('end').value = e.end;
     $('limit').value = e.limitMin; $('shuffleQuestions').checked = e.shuffleQuestions;
     $('shuffleChoices').checked = e.shuffleChoices; $('showScore').checked = e.showScore; $('active').checked = e.active;
@@ -185,7 +189,7 @@
   function resetForm() {
     editing = false;
     $('formTitle').textContent = 'New exam';
-    ['title', 'examId', 'instructions', 'end'].forEach(function (id) { $(id).value = ''; });
+    ['title', 'examId', 'course', 'instructions', 'end'].forEach(function (id) { $(id).value = ''; });
     $('examId').disabled = false;
     $('start').value = DATA ? DATA.now : '';
     $('limit').value = 30;
@@ -196,7 +200,7 @@
 
   function save() {
     var form = {
-      editing: editing, id: $('examId').value, title: $('title').value, instructions: $('instructions').value,
+      editing: editing, id: $('examId').value, title: $('title').value, course: $('course').value, instructions: $('instructions').value,
       start: $('start').value, end: $('end').value, limitMin: $('limit').value,
       shuffleQuestions: $('shuffleQuestions').checked, shuffleChoices: $('shuffleChoices').checked,
       showScore: $('showScore').checked, active: $('active').checked, questionIds: selectedOrder.slice()
@@ -204,9 +208,13 @@
     $('saveBtn').disabled = true;
     google.script.run.withSuccessHandler(function (r) {
       $('saveBtn').disabled = false;
-      showOk('Saved exam ' + r.id + '.' + (r.link ? ' Student link: ' + r.link : ' Set STUDENT_APP_URL in the Settings sheet to get the student link.'));
+      showOk('Saved exam ' + r.id + '.' + (r.link ? ' Student link: ' + r.link : ' Set STUDENT_APP_URL in the Settings sheet to get the student link.') +
+        (r.warning ? '  ⚠ ' + r.warning : ''));
       editing = true; $('examId').value = r.id; $('examId').disabled = true; $('formTitle').textContent = 'Edit exam: ' + r.id;
-      google.script.run.withSuccessHandler(function (d) { DATA = d; renderExams(); }).builderGetData();
+      google.script.run.withSuccessHandler(function (d) {
+        DATA = d; renderExams();
+        $('courseList').innerHTML = (d.courses || []).map(function (c) { return '<option value="' + esc(c) + '">'; }).join('');
+      }).builderGetData();
     }).withFailureHandler(function (err) { $('saveBtn').disabled = false; showErr(err); }).builderSaveExam(form);
   }
 

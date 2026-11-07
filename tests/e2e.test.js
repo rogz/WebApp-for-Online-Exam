@@ -177,6 +177,37 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok(a.Score === 11 && a.PendingEssays === 0 && a.Percent === 91.67, 'recalc after essay grading ' + JSON.stringify([a.Score, a.PendingEssays, a.Percent]));
   ok(gas.call({ action: 'submit', attemptId: st.attemptId, answers: {} }).ok, 'double submit idempotent');
 
+  // 10. Course enrolment (one student in two courses)
+  const env = { monitorCheck: 'supported' };
+  const ro = gas.sheet('Roster'); const roh = ro.data[0];
+  ok(roh.includes('Courses'), 'Roster has Courses column');
+  const addStudent = (o) => ro.appendRow(roh.map(h => o[h] ?? ''));
+  addStudent({ StudentID: "'2024-001", Name: 'Ana Santos', Courses: 'MATH101, SCI201' });
+  addStudent({ StudentID: "'2024-002", Name: 'Ben Cruz', Courses: 'sci 201' });
+  const mk = (id, course) => gas.ctx.builderSaveExam({ id, title: id, course, questionIds: ['Q001', 'Q003'], start: '', end: '', limitMin: 10, showScore: true, active: true });
+  const m = mk('MATH-MID', 'MATH101');
+  ok(!m.warning, 'no warning when students are enrolled');
+  mk('SCI-MID', 'SCI201');
+  ok(/No student/.test(mk('ENG-MID', 'ENG110').warning), 'warning for course with no students');
+  mk('OPEN-QUIZ', '');
+  const st1 = gas.call({ action: 'start', examId: 'MATH-MID', studentId: '2024-001', name: '', env });
+  const st2 = gas.call({ action: 'start', examId: 'SCI-MID', studentId: '2024-001', name: '', env });
+  ok(st1.ok && st2.ok && st1.studentName === 'Ana Santos', 'student in two courses can take both exams');
+  const no = gas.call({ action: 'start', examId: 'MATH-MID', studentId: '2024-002', name: '', env });
+  ok(no.code === 'NOT_ENROLLED' && /MATH101/.test(no.error), 'non-enrolled student blocked: ' + no.error);
+  ok(gas.call({ action: 'start', examId: 'SCI-MID', studentId: '2024-002', name: '', env }).ok, 'course match ignores case/spaces');
+  ok(gas.call({ action: 'start', examId: 'OPEN-QUIZ', studentId: '2024-002', name: '', env }).ok, 'exam without course open to roster');
+  ok(gas.call({ action: 'start', examId: 'OPEN-QUIZ', studentId: 'NOPE', name: 'x', env }).code === 'NOT_IN_ROSTER', 'unknown ID still blocked');
+  ok(attempts().find(x => x.AttemptID === st1.attemptId).Course === 'MATH101', 'attempt records course');
+  ok(gas.ctx.builderGetData().courses.join() === 'ENG110,MATH101,SCI201', 'builder course list: ' + gas.ctx.builderGetData().courses.join());
+
+  // 11. Upgrading an existing Sheet adds new columns without touching data
+  const old = create(path.join(REPO, 'apps-script/Code.gs'));
+  const r0 = old.ss.insertSheet('Roster'); r0.appendRow(['StudentID', 'Name', 'Email', 'AccessCode']); r0.appendRow(["'007", 'Old Student', '', '']);
+  old.ctx.setupSheets();
+  const after = old.sheet('Roster');
+  ok(after.data[0].join() === 'StudentID,Name,Email,AccessCode,Courses' && after.data[1][1] === 'Old Student', 'setup adds Courses column, keeps data');
+
   ok(errors.length === 0, 'no page errors ' + errors.join(' | '));
   await browser.close(); server.close();
   console.log(failures ? failures + ' FAILURE(S)' : 'ALL PASSED');

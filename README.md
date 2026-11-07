@@ -71,7 +71,7 @@ Use **Exam Admin → Check question bank for errors** to catch mistakes. You can
 
 ### Creating an exam
 **Exam Admin → Exam Builder…**
-- Enter a title, an optional Exam ID, instructions, **Opens / Closes** (the time window), and a **Time limit** in minutes.
+- Enter a title, an optional Exam ID, the **Course**, instructions, **Opens / Closes** (the time window), and a **Time limit** in minutes.
 - Tick questions from the bank. You can filter by type or topic and search.
 - Options: shuffle questions, shuffle choices, show the score after submitting, active.
 - Click **Save exam**, then **Copy student link**.
@@ -95,8 +95,20 @@ In **Responses**, enter points in `PointsEarned` for each `ESSAY` row, then clic
 Either tick the **AllowRetake** checkbox on the student's row in **Attempts**, or select the row(s) and click **Exam Admin → Allow retake for selected attempt(s)**.
 The student opens the same link and starts a fresh attempt with the full time limit, even if the exam window has already closed.
 
-### Optional: class list and access codes (`Roster` sheet)
-If you fill in `Roster`, only listed Student IDs can take exams, and names come from the roster. If you also fill in `AccessCode`, each student must enter their code.
+### Class list, courses and access codes: `Roster` sheet (optional)
+If the Roster is empty, anyone with an exam link can take it. If you fill it in, only listed Student IDs can take exams, and names come from the Roster.
+
+| StudentID | Name | Email | AccessCode | Courses |
+|---|---|---|---|---|
+| 2024-001 | Ana Santos | | 4821 | MATH101, SCI201 |
+| 2024-002 | Ben Cruz | | 7395 | SCI201 |
+
+- **Courses**: every course the student is enrolled in, separated by commas. A student can be in any number of courses.
+- In the Exam Builder, set the exam's **Course** (e.g. `MATH101`). Only students with that course in their Courses cell can take it. Everyone else sees *"You are not enrolled in MATH101"*.
+- Leave an exam's Course empty to let everyone on the Roster take it.
+- Capitals and spaces don't matter: `MATH 101` = `math101`.
+- **AccessCode** (optional): if filled in, the student must type it. This stops someone from using another student's ID.
+- The **Attempts** sheet records the course of each attempt, so you can filter results by course.
 
 ### Settings sheet
 | Key | Default | Meaning |
