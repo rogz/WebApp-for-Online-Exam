@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Online Exam</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand" id="brand">Online Exam</div>
+    <div class="topbar-right" id="examBar" hidden>
+      <span class="progress" id="progress">0 / 0 answered</span>
+      <span class="timer" id="timer" aria-live="polite">--:--</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- Loading -->
+    <section id="screen-loading" class="card center">
+      <div class="spinner" aria-hidden="true"></div>
+      <p>Loading exam…</p>
+    </section>
+
+    <!-- Error -->
+    <section id="screen-error" class="card" hidden>
+      <h1>Can't open this exam</h1>
+      <p id="errorText"></p>
+    </section>
+
+    <!-- Rules & pre-check -->
+    <section id="screen-rules" class="card" hidden>
+      <h1 id="examTitle"></h1>
+      <p class="instructions" id="examInstructions"></p>
+
+      <dl class="facts">
+        <div><dt>Questions</dt><dd id="factQuestions"></dd></div>
+        <div><dt>Total points</dt><dd id="factPoints"></dd></div>
+        <div><dt>Time limit</dt><dd id="factLimit"></dd></div>
+        <div><dt>Available</dt><dd id="factWindow"></dd></div>
+      </dl>
+      <div id="windowNotice" class="notice" hidden></div>
+
+      <div class="rules" role="alert">
+        <h2>⚠ Read before you start</h2>
+        <ul>
+          <li><b>Switching tabs or windows will VOID your exam.</b> This includes opening another tab, minimizing the browser, using Alt+Tab / Cmd+Tab, or clicking another application.</li>
+          <li><b>Multiple monitors are prohibited.</b> Disconnect any second monitor, TV or projector <u>before</u> starting. Connecting one during the exam will void it.</li>
+          <li><b>Do not refresh, close, or navigate away from this page.</b> That also voids your exam.</li>
+          <li>The timer starts when you click <i>Start exam</i>. When time runs out, your answers are submitted automatically.</li>
+          <li id="rulePaste" hidden>Copy, paste and right-click are disabled during the exam.</li>
+          <li>If your exam is voided, inform your instructor. Only your instructor can let you take it again.</li>
+        </ul>
+      </div>
+
+      <div class="checks">
+        <h2>System check</h2>
+        <ul>
+          <li id="checkBrowser"><span class="dot"></span><span class="label">Browser</span></li>
+          <li id="checkMonitor"><span class="dot"></span><span class="label">Monitors</span></li>
+        </ul>
+      </div>
+
+      <form id="startForm" autocomplete="off" novalidate>
+        <div class="grid2">
+          <label>Student ID<input id="studentId" required maxlength="64" autocomplete="off"></label>
+          <label>Full name<input id="studentName" required maxlength="120" autocomplete="off"></label>
+        </div>
+        <label id="accessCodeWrap" hidden>Access code<input id="accessCode" maxlength="64" autocomplete="off"></label>
+        <label class="agree"><input type="checkbox" id="agree"> I have read the rules. I understand that switching tabs or windows, or using a second monitor, will void my exam.</label>
+        <div id="startError" class="error" role="alert" hidden></div>
+        <button type="submit" class="btn primary big" id="startBtn" disabled>Start exam</button>
+      </form>
+    </section>
+
+    <!-- Exam -->
+    <section id="screen-exam" hidden>
+      <div class="card exam-head">
+        <h1 id="examTitle2"></h1>
+        <p class="muted" id="studentLine"></p>
+      </div>
+      <div id="timeWarning" class="notice warn" hidden></div>
+      <ol id="questions" class="questions"></ol>
+      <div class="card submit-bar">
+        <span id="progress2" class="muted"></span>
+        <button type="button" class="btn primary big" id="submitBtn">Submit exam</button>
+      </div>
+    </section>
+
+    <!-- Result -->
+    <section id="screen-result" class="card center" hidden>
+      <div class="big-icon ok">✓</div>
+      <h1>Exam submitted</h1>
+      <p id="resultText"></p>
+      <p class="score" id="resultScore" hidden></p>
+      <p class="muted" id="resultNote"></p>
+      <p class="muted">You may now close this page.</p>
+    </section>
+  </main>
+
+  <!-- Confirm submit -->
+  <div class="modal-backdrop" id="confirmModal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+      <h2 id="confirmTitle">Submit your exam?</h2>
+      <p id="confirmText"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn" id="confirmNo">Keep answering</button>
+        <button type="button" class="btn primary" id="confirmYes">Submit now</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Voided -->
+  <div class="modal-backdrop void" id="voidModal" hidden>
+    <div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="voidTitle">
+      <div class="big-icon bad">✕</div>
+      <h2 id="voidTitle">Your exam has been VOIDED</h2>
+      <p class="void-reason" id="voidReason"></p>
+      <p><b>Please inform your instructor about this event.</b> Your instructor can decide whether to allow you to take the exam again.</p>
+      <dl class="void-facts">
+        <div><dt>Student</dt><dd id="voidStudent"></dd></div>
+        <div><dt>Exam</dt><dd id="voidExam"></dd></div>
+        <div><dt>Time</dt><dd id="voidTime"></dd></div>
+        <div><dt>Reference</dt><dd id="voidRef"></dd></div>
+      </dl>
+    </div>
+  </div>
+
+  <!-- Busy -->
+  <div class="modal-backdrop" id="busyModal" hidden>
+    <div class="modal center"><div class="spinner" aria-hidden="true"></div><p id="busyText">Please wait…</p></div>
+  </div>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
