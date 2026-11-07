@@ -24,6 +24,10 @@
     violations: [],
     warned5: false,
     warned1: false,
+    oneAtATime: false,   // show one question at a time
+    allowBack: true,     // may return to earlier questions (one-at-a-time mode)
+    index: 0,            // current question in one-at-a-time mode
+    locked: new Set(),   // questions that can no longer be changed
   };
 
   // ───────── API ─────────
@@ -157,6 +161,13 @@
     $('factWindow').textContent = (exam.startText ? 'From ' + exam.startText : 'Now') + (exam.endText ? ' until ' + exam.endText : '');
     $('accessCodeWrap').hidden = !state.info.requiresAccessCode;
     $('rulePaste').hidden = !rules.blockCopyPaste;
+    const nav = $('ruleNav');
+    if (exam.displayMode === 'ONE') {
+      nav.hidden = false;
+      nav.innerHTML = exam.allowBack
+        ? 'Questions are shown <b>one at a time</b>. You can go back to earlier questions before submitting.'
+        : 'Questions are shown <b>one at a time</b>. <b>You cannot go back</b> to a question once you click <i>Next</i>, so answer each one before moving on.';
+    }
     show('rules');
     refreshStartButton();
   }
@@ -216,10 +227,17 @@
     }
     state.endAt = r.remainingMs === null || r.remainingMs === undefined ? null : Date.now() + r.remainingMs;
 
+    state.oneAtATime = state.info.exam.displayMode === 'ONE';
+    state.allowBack = !state.oneAtATime || state.info.exam.allowBack !== false;
+    state.locked = new Set(state.allowBack ? [] : (r.lockedIds || []));
+    const firstOpen = state.questions.findIndex((q) => !state.locked.has(q.id));
+    state.index = firstOpen === -1 ? state.questions.length - 1 : firstOpen;
+
     $('examTitle2').textContent = state.info.exam.title;
     $('studentLine').textContent = state.student.name + ' · ' + state.student.id + (r.isRetake ? ' · Retake' : '') + (r.resumed ? ' · Resumed' : '');
     renderQuestions();
     show('exam');
+    if (state.oneAtATime) setupPager();
     if (state.rules.blockCopyPaste) document.body.classList.add('locked');
     state.active = true;
     tick();
@@ -231,7 +249,7 @@
   function renderQuestions() {
     const ol = $('questions');
     ol.textContent = '';
-    state.questions.forEach((q) => {
+    state.questions.forEach((q, qi) => {
       const li = document.createElement('li');
       li.className = 'card question';
       li.dataset.id = q.id;
@@ -239,6 +257,7 @@
       const head = document.createElement('div');
       head.className = 'q-head';
       const num = document.createElement('span'); num.className = 'q-num';
+      num.textContent = 'Question ' + (qi + 1);
       const meta = document.createElement('span'); meta.className = 'q-meta';
       meta.textContent = ({ MC: 'Multiple choice', TF: 'True or false', FIB: 'Fill in the blank', ESSAY: 'Essay' }[q.type]) +
         ' · ' + q.points + (q.points === 1 ? ' point' : ' points');
@@ -336,6 +355,90 @@
     $('progress').textContent = t;
     $('progress2').textContent = t;
     document.querySelectorAll('.question').forEach((li) => li.classList.toggle('answered', isAnswered(li.dataset.id)));
+    document.querySelectorAll('#palette button').forEach((b) => b.classList.toggle('answered', isAnswered(b.dataset.id)));
+  }
+
+  // ───────── One question at a time ─────────
+
+  function setupPager() {
+    $('pager').hidden = false;
+    $('submitBar').hidden = true;
+    const pal = $('palette');
+    pal.textContent = '';
+    pal.hidden = !state.allowBack;
+    if (state.allowBack) {
+      state.questions.forEach((q, i) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = String(i + 1);
+        b.dataset.id = q.id;
+        b.setAttribute('aria-label', 'Go to question ' + (i + 1));
+        b.addEventListener('click', () => showQuestion(i));
+        pal.appendChild(b);
+      });
+    }
+    state.locked.forEach((id) => lockInputs(id));
+    updateProgress();
+    showQuestion(state.index);
+  }
+
+  function showQuestion(i) {
+    state.index = Math.max(0, Math.min(i, state.questions.length - 1));
+    const id = state.questions[state.index].id;
+    document.querySelectorAll('.question').forEach((li) => { li.hidden = li.dataset.id !== id; });
+    document.querySelectorAll('#palette button').forEach((b, j) => b.classList.toggle('current', j === state.index));
+    const last = state.index === state.questions.length - 1;
+    $('pagerCount').textContent = 'Question ' + (state.index + 1) + ' of ' + state.questions.length;
+    $('prevBtn').hidden = !state.allowBack;
+    $('prevBtn').disabled = state.index === 0;
+    $('nextBtn').textContent = last ? 'Submit exam' : 'Next →';
+    window.scrollTo(0, 0);
+  }
+
+  function lockInputs(id) {
+    const li = document.querySelector('.question[data-id="' + CSS.escape(id) + '"]');
+    if (!li) return;
+    li.classList.add('locked');
+    li.querySelectorAll('input, textarea').forEach((el) => { el.disabled = true; });
+  }
+
+  function goNext() {
+    if (!state.active) return;
+    const q = state.questions[state.index];
+    const last = state.index === state.questions.length - 1;
+    if (last) { askSubmit(); return; }
+    const advance = () => {
+      if (!state.allowBack) {
+        state.locked.add(q.id);
+        lockInputs(q.id);
+        const value = state.answers[q.id] === undefined ? '' : state.answers[q.id];
+        api('lockAnswer', { attemptId: state.attemptId, questionId: q.id, value }, 3).catch((e) => {
+          if (e.code === 'VOIDED') showVoid(null, e.message);
+        });
+      }
+      showQuestion(state.index + 1);
+    };
+    if (!state.allowBack && !isAnswered(q.id)) {
+      confirmBox('Skip this question?', 'You have not answered Question ' + (state.index + 1) +
+        '. You cannot come back to it after moving on.', 'Skip it', 'Go back', advance);
+      return;
+    }
+    advance();
+  }
+
+  function goPrev() {
+    if (state.active && state.allowBack) showQuestion(state.index - 1);
+  }
+
+  let confirmAction = null;
+  function confirmBox(title, text, yesLabel, noLabel, onYes) {
+    $('confirmTitle').textContent = title;
+    $('confirmText').textContent = text;
+    $('confirmYes').textContent = yesLabel;
+    $('confirmNo').textContent = noLabel;
+    confirmAction = onYes;
+    $('confirmModal').hidden = false;
+    $('confirmNo').focus();
   }
 
   function fmtTime(ms) {
@@ -366,11 +469,10 @@
 
   function askSubmit() {
     const unanswered = state.questions.map((q, i) => (isAnswered(q.id) ? null : i + 1)).filter(Boolean);
-    $('confirmText').textContent = unanswered.length
+    confirmBox('Submit your exam?', unanswered.length
       ? 'You have ' + unanswered.length + ' unanswered question(s): #' + unanswered.join(', #') + '. You cannot change your answers after submitting.'
-      : 'You answered all questions. You cannot change your answers after submitting.';
-    $('confirmModal').hidden = false;
-    $('confirmNo').focus();
+      : 'You answered all questions. You cannot change your answers after submitting.',
+    'Submit now', 'Keep answering', () => submitExam(false));
   }
 
   async function submitExam(auto) {
@@ -530,7 +632,13 @@
     $('agree').addEventListener('change', refreshStartButton);
     $('submitBtn').addEventListener('click', askSubmit);
     $('confirmNo').addEventListener('click', () => { $('confirmModal').hidden = true; });
-    $('confirmYes').addEventListener('click', () => submitExam(false));
+    $('confirmYes').addEventListener('click', () => {
+      $('confirmModal').hidden = true;
+      const f = confirmAction; confirmAction = null;
+      if (f) f();
+    });
+    $('nextBtn').addEventListener('click', goNext);
+    $('prevBtn').addEventListener('click', goPrev);
 
     if (!API_URL || API_URL.indexOf('PASTE_') === 0) {
       showError('This exam page is not set up yet: the instructor needs to put the Apps Script Web App URL in config.js.');

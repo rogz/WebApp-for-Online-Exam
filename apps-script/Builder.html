@@ -49,13 +49,17 @@
     <datalist id="courseList"></datalist>
     <label for="instructions">Instructions for students</label>
     <textarea id="instructions"></textarea>
-    <div class="row">
-      <div><label for="start">Opens</label><input type="datetime-local" id="start"></div>
-      <div><label for="end">Closes</label><input type="datetime-local" id="end"></div>
-    </div>
+    <label for="start">Opens</label><input type="datetime-local" id="start">
+    <label for="end">Closes</label><input type="datetime-local" id="end">
     <div class="muted" id="tzNote"></div>
     <label for="limit">Time limit (minutes, 0 = until the exam closes)</label>
     <input type="number" id="limit" min="0" value="30">
+    <label for="displayMode">How questions are shown</label>
+    <select id="displayMode" onchange="syncNav()">
+      <option value="ALL">All questions on one page (scroll)</option>
+      <option value="ONE">One question at a time</option>
+    </select>
+    <label class="check" id="allowBackWrap"><input type="checkbox" id="allowBack" checked> Allow going back to previous questions</label>
     <label class="check"><input type="checkbox" id="shuffleQuestions" checked> Shuffle question order</label>
     <label class="check"><input type="checkbox" id="shuffleChoices" checked> Shuffle multiple-choice options</label>
     <label class="check"><input type="checkbox" id="showScore" checked> Show score to students after submitting</label>
@@ -102,6 +106,12 @@
   var TYPE_LABEL = { MC: 'MC', TF: 'T/F', FIB: 'Blank', ESSAY: 'Essay' };
 
   function $(id) { return document.getElementById(id); }
+  function syncNav() {
+    var one = $('displayMode').value === 'ONE';
+    $('allowBack').disabled = !one;
+    $('allowBackWrap').style.opacity = one ? 1 : 0.5;
+    if (!one) $('allowBack').checked = true;
+  }
   function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
 
   function load() {
@@ -166,6 +176,7 @@
     $('examList').innerHTML = DATA.exams.map(function (e, i) {
       return '<div class="exam-item"><b>' + esc(e.title) + '</b> <span class="muted">' + esc(e.id) + (e.course ? ' · ' + esc(e.course) : '') + (e.active ? '' : ' · inactive') + '</span>' +
         '<div class="muted">' + e.questionIds.length + ' questions · ' + (e.limitMin ? e.limitMin + ' min' : 'no limit') +
+        (e.displayMode === 'ONE' ? ' · one at a time' + (e.allowBack ? '' : ', no going back') : '') +
         (e.start ? ' · opens ' + esc(e.start.replace('T', ' ')) : '') + (e.end ? ' · closes ' + esc(e.end.replace('T', ' ')) : '') + '</div>' +
         '<div class="actions"><button onclick="editExam(' + i + ')">Edit</button>' +
         (e.link ? '<button onclick="copyLink(' + i + ')">Copy student link</button>' : '<span class="muted">Set STUDENT_APP_URL in Settings to get a link</span>') +
@@ -181,6 +192,7 @@
     $('instructions').value = e.instructions; $('start').value = e.start; $('end').value = e.end;
     $('limit').value = e.limitMin; $('shuffleQuestions').checked = e.shuffleQuestions;
     $('shuffleChoices').checked = e.shuffleChoices; $('showScore').checked = e.showScore; $('active').checked = e.active;
+    $('displayMode').value = e.displayMode || 'ALL'; $('allowBack').checked = e.allowBack !== false; syncNav();
     selected = {}; selectedOrder = [];
     e.questionIds.forEach(function (id) { selected[id] = true; selectedOrder.push(id); });
     hideMsg(); renderBank();
@@ -193,7 +205,8 @@
     $('examId').disabled = false;
     $('start').value = DATA ? DATA.now : '';
     $('limit').value = 30;
-    ['shuffleQuestions', 'shuffleChoices', 'showScore', 'active'].forEach(function (id) { $(id).checked = true; });
+    ['shuffleQuestions', 'shuffleChoices', 'showScore', 'active', 'allowBack'].forEach(function (id) { $(id).checked = true; });
+    $('displayMode').value = 'ALL'; syncNav();
     selected = {}; selectedOrder = [];
     hideMsg(); if (DATA) renderBank();
   }
@@ -203,7 +216,8 @@
       editing: editing, id: $('examId').value, title: $('title').value, course: $('course').value, instructions: $('instructions').value,
       start: $('start').value, end: $('end').value, limitMin: $('limit').value,
       shuffleQuestions: $('shuffleQuestions').checked, shuffleChoices: $('shuffleChoices').checked,
-      showScore: $('showScore').checked, active: $('active').checked, questionIds: selectedOrder.slice()
+      showScore: $('showScore').checked, active: $('active').checked, questionIds: selectedOrder.slice(),
+      displayMode: $('displayMode').value, allowBack: $('allowBack').checked
     };
     $('saveBtn').disabled = true;
     google.script.run.withSuccessHandler(function (r) {

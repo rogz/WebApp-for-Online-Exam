@@ -208,6 +208,65 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const after = old.sheet('Roster');
   ok(after.data[0].join() === 'StudentID,Name,Email,AccessCode,Courses' && after.data[1][1] === 'Old Student', 'setup adds Courses column, keeps data');
 
+  // 12. One question at a time, going back allowed
+  ro.data.splice(1); // empty the roster again so anyone can take the next exams
+  const mk2 = (id, displayMode, allowBack) => gas.ctx.builderSaveExam({ id, title: id, questionIds: ['Q001', 'Q003', 'Q005'], start: '', end: '', limitMin: 10, showScore: true, active: true, displayMode, allowBack, shuffleQuestions: false });
+  mk2('ONE-BACK', 'ONE', true);
+  mk2('ONE-NOBACK', 'ONE', false);
+  mk2('SCROLL-NOBACK', 'ALL', false);
+  ok(gas.ctx.builderGetData().exams.find(e => e.id === 'SCROLL-NOBACK').allowBack === true, 'scroll mode always allows back');
+  const visibleIds = pg => pg.$$eval('.question', els => els.filter(e => !e.hidden).map(e => e.dataset.id));
+  p = await open('ONE-BACK');
+  await p.waitForSelector('#screen-rules:not([hidden])');
+  ok((await p.textContent('#ruleNav')).includes('can go back'), 'rules mention one-at-a-time with back');
+  await startAs(p, 'N1', 'Nina One');
+  await p.waitForSelector('#screen-exam:not([hidden])');
+  ok((await visibleIds(p)).join() === 'Q001', 'only first question visible');
+  ok(await p.isVisible('#palette') && (await p.$$('#palette button')).length === 3, 'palette shown');
+  ok(await p.isDisabled('#prevBtn'), 'previous disabled on first');
+  await p.click('.question[data-id="Q001"] .choice:has-text("Mars")');
+  await p.click('#nextBtn');
+  ok((await visibleIds(p)).join() === 'Q003' && (await p.textContent('#pagerCount')) === 'Question 2 of 3', 'next shows question 2');
+  await p.click('#prevBtn');
+  ok((await visibleIds(p)).join() === 'Q001', 'previous goes back');
+  ok(await p.isChecked('.question[data-id="Q001"] input[type=radio]:checked'), 'answer kept after going back');
+  await p.click('#palette button:nth-child(3)');
+  ok((await p.textContent('#nextBtn')) === 'Submit exam', 'last question shows Submit');
+  await p.fill('.question[data-id="Q005"] input.blank', 'Au');
+  await p.screenshot({ path: path.join(require('os').tmpdir(), 'one-at-a-time.png') });
+  await p.click('#nextBtn'); await p.click('#confirmYes');
+  await p.waitForSelector('#screen-result:not([hidden])');
+  ok((await p.textContent('#resultScore')).includes('2 / 3'), 'one-at-a-time submit graded');
+  await p.close();
+
+  // 13. One at a time, no going back
+  p = await open('ONE-NOBACK');
+  await p.waitForSelector('#screen-rules:not([hidden])');
+  ok((await p.textContent('#ruleNav')).includes('cannot go back'), 'rules warn no going back');
+  await startAs(p, 'N2', 'Noel Two');
+  await p.waitForSelector('#screen-exam:not([hidden])');
+  ok(await p.isHidden('#prevBtn') && await p.isHidden('#palette'), 'no previous button or palette');
+  await p.click('.question[data-id="Q001"] .choice:has-text("Venus")'); // wrong answer, gets locked
+  await p.click('#nextBtn');
+  await sleep(300);
+  await p.click('#nextBtn'); // skipping an unanswered question asks first
+  ok(await p.isVisible('#confirmModal') && (await p.textContent('#confirmTitle')).includes('Skip'), 'skip warning shown');
+  await p.click('#confirmNo');
+  ok((await visibleIds(p)).join() === 'Q003', 'stayed on question after Go back');
+  await p.check('.question[data-id="Q003"] input[value="TRUE"]');
+  await p.click('#nextBtn');
+  await sleep(300);
+  const att = attempts().find(x => x.StudentID === 'N2');
+  const prog = gas.sheet('Progress').objects().filter(r => r.AttemptID === att.AttemptID);
+  ok(prog.map(r => r.QuestionID).join() === 'Q001,Q003', 'answers locked on server: ' + prog.map(r => r.QuestionID).join());
+  const res = gas.call({ action: 'start', examId: 'ONE-NOBACK', studentId: 'N2', name: 'Noel Two', env });
+  ok(res.resumed && res.lockedIds.join() === 'Q001,Q003', 'resume returns locked questions');
+  const marsKey = res.questions.find(q => q.id === 'Q001').choices.find(c => c.text === 'Mars').key;
+  const tam = gas.call({ action: 'submit', attemptId: att.AttemptID, answers: { Q001: marsKey, Q003: 'TRUE', Q005: 'Au' } });
+  ok(tam.score === 2, 'locked wrong answer stays wrong: score ' + tam.score);
+  ok(gas.call({ action: 'lockAnswer', attemptId: att.AttemptID, questionId: 'Q005', value: 'x' }).code === 'ALREADY_SUBMITTED', 'no locking after submit');
+  await p.close();
+
   ok(errors.length === 0, 'no page errors ' + errors.join(' | '));
   await browser.close(); server.close();
   console.log(failures ? failures + ' FAILURE(S)' : 'ALL PASSED');

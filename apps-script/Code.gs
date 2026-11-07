@@ -26,13 +26,15 @@ const SHEET = {
   ATTEMPTS: 'Attempts',
   RESPONSES: 'Responses',
   VIOLATIONS: 'Violations',
+  PROGRESS: 'Progress',
   SETTINGS: 'Settings',
 };
 
 const HEADERS = {
   Questions: ['QuestionID', 'Type', 'Question', 'Choices', 'Answer', 'Points', 'Topic'],
   Exams: ['ExamID', 'Title', 'Instructions', 'QuestionIDs', 'StartDateTime', 'EndDateTime',
-    'TimeLimitMinutes', 'ShuffleQuestions', 'ShuffleChoices', 'ShowScore', 'Active', 'Course'],
+    'TimeLimitMinutes', 'ShuffleQuestions', 'ShuffleChoices', 'ShowScore', 'Active', 'Course',
+    'DisplayMode', 'AllowBack'],
   Roster: ['StudentID', 'Name', 'Email', 'AccessCode', 'Courses'],
   Attempts: ['AttemptID', 'ExamID', 'StudentID', 'Name', 'Status', 'StartedAt', 'Deadline',
     'SubmittedAt', 'Score', 'MaxScore', 'Percent', 'PendingEssays', 'Late', 'VoidReason',
@@ -40,6 +42,7 @@ const HEADERS = {
   Responses: ['AttemptID', 'ExamID', 'StudentID', 'QuestionID', 'Type', 'Question',
     'StudentAnswer', 'CorrectAnswer', 'IsCorrect', 'PointsEarned', 'MaxPoints'],
   Violations: ['Timestamp', 'AttemptID', 'ExamID', 'StudentID', 'Name', 'Event', 'Detail'],
+  Progress: ['Timestamp', 'AttemptID', 'QuestionID', 'Answer'],
   Settings: ['Key', 'Value', 'Description'],
 };
 
@@ -100,6 +103,8 @@ const API_ = {
         id: exam.id,
         title: exam.title,
         course: exam.course,
+        displayMode: exam.displayMode,
+        allowBack: exam.allowBack,
         instructions: exam.instructions,
         questionCount: questions.length,
         totalPoints: sum_(questions.map(q => q.points)),
@@ -236,6 +241,7 @@ const API_ = {
         deadlineMs: deadline ? deadline.getTime() : null,
         remainingMs: deadline ? Math.max(0, deadline.getTime() - now.getTime()) : null,
         questions: ordered.map(q => publicQuestion_(q, exam, attempt.AttemptID)),
+        lockedIds: resumed && !exam.allowBack ? Object.keys(lockedAnswers_(attempt.AttemptID)) : [],
       };
     });
   },
@@ -249,6 +255,25 @@ const API_ = {
       logViolation_(a, event, req.detail);
       if (a.Status === STATUS.IN_PROGRESS) voidAttempt_(attempts, a, event);
       return { status: a.Status, reason: a.VoidReason };
+    });
+  },
+
+  /** One-question-at-a-time without going back: saves and locks an answer when the student moves on. */
+  lockAnswer(req) {
+    return withLock_(() => {
+      const attempts = readTable_(SHEET.ATTEMPTS);
+      const a = findAttempt_(attempts, req.attemptId);
+      if (a.Status !== STATUS.IN_PROGRESS) throw blockedError_(a);
+      const exam = examConfig_(getExamRow_(a.ExamID, true));
+      if (exam.allowBack) return { locked: false };
+      const qid = String(req.questionId || '');
+      if (exam.questionIds.indexOf(qid) === -1) throw apiError_('BAD_INPUT', 'Unknown question.');
+      const locked = lockedAnswers_(a.AttemptID);
+      if (!(qid in locked)) {
+        const v = req.value === undefined || req.value === null ? '' : String(req.value).slice(0, 20000);
+        appendObj_(readTable_(SHEET.PROGRESS), { Timestamp: new Date(), AttemptID: a.AttemptID, QuestionID: asText_(qid), Answer: asText_(v) });
+      }
+      return { locked: true };
     });
   },
 
@@ -279,7 +304,8 @@ const API_ = {
 
       const bank = getQuestionBank_();
       const questions = examQuestions_(exam, bank);
-      const answers = (req.answers && typeof req.answers === 'object') ? req.answers : {};
+      const answers = Object.assign({}, (req.answers && typeof req.answers === 'object') ? req.answers : {});
+      if (!exam.allowBack) Object.assign(answers, lockedAnswers_(a.AttemptID)); // locked answers can't be changed
 
       let score = 0, max = 0, pending = 0;
       const rows = questions.map(q => {
@@ -399,7 +425,7 @@ function getExamRow_(examId, allowInactive) {
 }
 
 function examConfig_(row) {
-  return {
+  const cfg = {
     id: String(row.ExamID).trim(),
     title: String(row.Title || row.ExamID),
     instructions: String(row.Instructions || ''),
@@ -411,7 +437,11 @@ function examConfig_(row) {
     shuffleChoices: toBool_(row.ShuffleChoices, false),
     showScore: toBool_(row.ShowScore, true),
     course: String(row.Course || '').trim(),
+    displayMode: String(row.DisplayMode || '').trim().toUpperCase() === 'ONE' ? 'ONE' : 'ALL',
   };
+  // "No going back" only makes sense when questions are shown one at a time
+  cfg.allowBack = cfg.displayMode === 'ONE' ? toBool_(row.AllowBack, true) : true;
+  return cfg;
 }
 
 function getQuestionBank_() {
@@ -485,6 +515,16 @@ function windowStatus_(exam, now) {
 }
 
 // ───────────────────────────── Attempts ─────────────────────────────
+
+/** Answers locked for an attempt: { questionId: answer } (first save wins). */
+function lockedAnswers_(attemptId) {
+  const out = {};
+  readTable_(SHEET.PROGRESS).rows.forEach(r => {
+    const q = String(r.QuestionID);
+    if (String(r.AttemptID) === String(attemptId) && !(q in out)) out[q] = r.Answer === null ? '' : String(r.Answer);
+  });
+  return out;
+}
 
 function findAttempt_(table, attemptId) {
   const id = String(attemptId || '').trim();
@@ -624,6 +664,7 @@ function builderGetData() {
       end: e.end ? Utilities.formatDate(e.end, tz, "yyyy-MM-dd'T'HH:mm") : '',
       limitMin: e.limitMin, shuffleQuestions: e.shuffleQuestions, shuffleChoices: e.shuffleChoices,
       showScore: e.showScore, active: toBool_(r.Active, true), link: examLink_(e.id, settings),
+      displayMode: e.displayMode, allowBack: e.allowBack,
     };
   });
   return {
@@ -685,6 +726,8 @@ function builderSaveExam(form) {
     ShowScore: !!form.showScore,
     Active: form.active !== false,
     Course: asText_(String(form.course || '').trim()),
+    DisplayMode: form.displayMode === 'ONE' ? 'ONE' : 'ALL',
+    AllowBack: form.displayMode === 'ONE' ? form.allowBack !== false : true,
   };
   const existing = table.rows.find(r => String(r.ExamID).trim().toLowerCase() === examId.toLowerCase());
   if (existing) {

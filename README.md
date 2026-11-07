@@ -73,6 +73,10 @@ Use **Exam Admin → Check question bank for errors** to catch mistakes. You can
 **Exam Admin → Exam Builder…**
 - Enter a title, an optional Exam ID, the **Course**, instructions, **Opens / Closes** (the time window), and a **Time limit** in minutes.
 - Tick questions from the bank. You can filter by type or topic and search.
+- **How questions are shown**:
+  - *All questions on one page*: students scroll and can change any answer until they submit.
+  - *One question at a time*: Next / Previous buttons plus numbered buttons to jump between questions.
+    - Untick **Allow going back** to make it forward-only. There is no Previous button, and each answer is **locked on the server** when the student clicks Next, saved in the `Progress` sheet. Students are warned before skipping an unanswered question.
 - Options: shuffle questions, shuffle choices, show the score after submitting, active.
 - Click **Save exam**, then **Copy student link**.
 
