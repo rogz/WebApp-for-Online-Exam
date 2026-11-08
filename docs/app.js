@@ -259,8 +259,10 @@
     $('examInstructions').textContent = exam.instructions;
     $('examInstructions').hidden = !exam.instructions;
     const types = { MC: 'multiple choice', TF: 'true/false', FIB: 'fill in the blank', ESSAY: 'essay' };
-    $('factQuestions').textContent = exam.questionCount + ' (' + Object.keys(exam.typeCounts).map((k) => exam.typeCounts[k] + ' ' + (types[k] || k)).join(', ') + ')';
-    $('factPoints').textContent = exam.totalPoints;
+    $('factQuestions').textContent = exam.poolSize
+      ? exam.questionCount + ' (picked at random from ' + exam.poolSize + ')'
+      : exam.questionCount + ' (' + Object.keys(exam.typeCounts).map((k) => exam.typeCounts[k] + ' ' + (types[k] || k)).join(', ') + ')';
+    $('factPoints').textContent = exam.totalPoints === null ? 'Depends on your questions' : exam.totalPoints;
     $('factLimit').textContent = exam.timeLimitMinutes ? exam.timeLimitMinutes + ' minutes' : 'No limit (until the exam closes)';
     $('factWindow').textContent = (exam.startText ? 'From ' + exam.startText : 'Now') + (exam.endText ? ' until ' + exam.endText : '');
     $('accessCodeWrap').hidden = !state.info.requiresAccessCode;

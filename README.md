@@ -81,6 +81,10 @@ Use **Exam Admin → Check question bank for errors** to catch mistakes. You can
     - Untick **Allow going back** to make it forward-only. There is no Previous button, and each answer is **locked on the server** when the student clicks Next, saved in the `Progress` sheet. Students are warned before skipping an unanswered question.
     - **Time limit per question** (seconds, 0 = none): a small ⏱ timer shows on each question. When it runs out, the exam moves to the next question, or submits after the last one. Going back is turned off automatically.
 - **Camera / face check**: *Not required*, *Check face at the start only*, or *Monitor face during the whole exam* (see below).
+- **Questions per student** (0 = all): tick a pool, e.g. 50 questions, and enter 10. **Each student gets their own random 10.**
+  - A student keeps the same set if they reconnect, and is graded only on their own questions.
+  - Combine it with **Shuffle question order** to also mix up the order.
+  - Tip: give pool questions the same points so every student's total is the same. The rules screen shows *"10 (picked at random from 50)"*.
 - Options: shuffle questions, shuffle choices, show the score after submitting, active.
 - Click **Save exam**, then **Copy student link**.
 

@@ -34,7 +34,7 @@ const HEADERS = {
   Questions: ['QuestionID', 'Type', 'Question', 'Choices', 'Answer', 'Points', 'Topic'],
   Exams: ['ExamID', 'Title', 'Instructions', 'QuestionIDs', 'StartDateTime', 'EndDateTime',
     'TimeLimitMinutes', 'ShuffleQuestions', 'ShuffleChoices', 'ShowScore', 'Active', 'Course',
-    'DisplayMode', 'AllowBack', 'FaceMonitor', 'CameraPreview', 'QuestionTimeSeconds'],
+    'DisplayMode', 'AllowBack', 'FaceMonitor', 'CameraPreview', 'QuestionTimeSeconds', 'QuestionsPerStudent'],
   Roster: ['StudentID', 'Name', 'Email', 'AccessCode', 'Courses'],
   Attempts: ['AttemptID', 'ExamID', 'StudentID', 'Name', 'Status', 'StartedAt', 'Deadline',
     'SubmittedAt', 'Score', 'MaxScore', 'Percent', 'PendingEssays', 'Late', 'VoidReason',
@@ -128,9 +128,13 @@ const API_ = {
         questionSeconds: exam.questionSeconds,
         allowBack: exam.allowBack,
         instructions: exam.instructions,
-        questionCount: questions.length,
-        totalPoints: sum_(questions.map(q => q.points)),
-        typeCounts: countBy_(questions, q => q.type),
+        questionCount: exam.pickCount > 0 ? Math.min(exam.pickCount, questions.length) : questions.length,
+        poolSize: exam.pickCount > 0 && exam.pickCount < questions.length ? questions.length : null,
+        // With a random set per student, points/types can differ between students
+        totalPoints: exam.pickCount > 0 && exam.pickCount < questions.length
+          ? (questions.every(q => q.points === questions[0].points) ? exam.pickCount * questions[0].points : null)
+          : sum_(questions.map(q => q.points)),
+        typeCounts: exam.pickCount > 0 && exam.pickCount < questions.length ? null : countBy_(questions, q => q.type),
         timeLimitMinutes: exam.limitMin,
         startMs: exam.start ? exam.start.getTime() : null,
         endMs: exam.end ? exam.end.getTime() : null,
@@ -238,8 +242,9 @@ const API_ = {
         let deadline = exam.limitMin > 0 ? new Date(now.getTime() + exam.limitMin * 60000) : null;
         if (!isRetake && exam.end && (!deadline || exam.end < deadline)) deadline = exam.end;
 
+        const newId = Utilities.getUuid();
         attempt = {
-          AttemptID: Utilities.getUuid(),
+          AttemptID: newId,
           ExamID: exam.id,
           StudentID: asText_(studentId),
           Name: asText_(name),
@@ -248,7 +253,7 @@ const API_ = {
           Deadline: deadline || '',
           SubmittedAt: '',
           Score: '',
-          MaxScore: sum_(questions.map(q => q.points)),
+          MaxScore: sum_(attemptQuestions_(exam, questions, newId).map(q => q.points)),
           Percent: '',
           PendingEssays: '',
           Late: '',
@@ -265,7 +270,7 @@ const API_ = {
       }
 
       const deadline = toDate_(attempt.Deadline);
-      const ordered = exam.shuffleQuestions ? seededShuffle_(questions, attempt.AttemptID) : questions;
+      const ordered = attemptQuestions_(exam, questions, attempt.AttemptID);
       return {
         attemptId: attempt.AttemptID,
         studentId: studentId,
@@ -311,7 +316,8 @@ const API_ = {
       const exam = examConfig_(getExamRow_(a.ExamID, true));
       if (exam.allowBack) return { locked: false };
       const qid = String(req.questionId || '');
-      if (exam.questionIds.indexOf(qid) === -1) throw apiError_('BAD_INPUT', 'Unknown question.');
+      const mine = attemptQuestions_(exam, examQuestions_(exam, getQuestionBank_()), a.AttemptID).map(q => q.id);
+      if (mine.indexOf(qid) === -1) throw apiError_('BAD_INPUT', 'Unknown question.');
       const locked = lockedAnswers_(a.AttemptID);
       if (!(qid in locked)) {
         const v = req.value === undefined || req.value === null ? '' : String(req.value).slice(0, 20000);
@@ -378,7 +384,7 @@ const API_ = {
       const late = !!deadline && now.getTime() > deadline.getTime() + settings.SUBMIT_GRACE_SECONDS * 1000;
 
       const bank = getQuestionBank_();
-      const questions = examQuestions_(exam, bank);
+      const questions = attemptQuestions_(exam, examQuestions_(exam, bank), a.AttemptID);
       const answers = Object.assign({}, (req.answers && typeof req.answers === 'object') ? req.answers : {});
       if (!exam.allowBack) Object.assign(answers, lockedAnswers_(a.AttemptID)); // locked answers can't be changed
 
@@ -530,6 +536,7 @@ function examConfig_(row) {
     faceMode: parseFaceMode_(row.FaceMonitor),
     cameraPreview: toBool_(row.CameraPreview, true),
     questionSeconds: Math.max(0, Math.round(Number(row.QuestionTimeSeconds) || 0)),
+    pickCount: Math.max(0, Math.round(Number(row.QuestionsPerStudent) || 0)),
   };
   // "No going back" only makes sense when questions are shown one at a time
   cfg.allowBack = cfg.displayMode === 'ONE' ? toBool_(row.AllowBack, true) : true;
@@ -558,6 +565,21 @@ function getQuestionBank_() {
     };
   });
   return map;
+}
+
+/**
+ * The questions one attempt gets. With "Questions per student" set (e.g. 10 of 50),
+ * each student gets their own random set; it is the same set every time for that
+ * attempt (reconnects, grading). Order is shuffled too if "Shuffle questions" is on.
+ */
+function attemptQuestions_(exam, pool, attemptId) {
+  let qs = pool;
+  if (exam.pickCount > 0 && exam.pickCount < pool.length) {
+    const picked = {};
+    seededShuffle_(pool, attemptId + ':pick').slice(0, exam.pickCount).forEach(q => { picked[q.id] = true; });
+    qs = pool.filter(q => picked[q.id]);
+  }
+  return exam.shuffleQuestions ? seededShuffle_(qs, String(attemptId)) : qs;
 }
 
 function examQuestions_(exam, bank) {
@@ -797,7 +819,7 @@ function builderGetData() {
       end: e.end ? Utilities.formatDate(e.end, tz, "yyyy-MM-dd'T'HH:mm") : '',
       limitMin: e.limitMin, shuffleQuestions: e.shuffleQuestions, shuffleChoices: e.shuffleChoices,
       showScore: e.showScore, active: toBool_(r.Active, true), link: examLink_(e.id, settings),
-      displayMode: e.displayMode, allowBack: e.allowBack, faceMode: e.faceMode, cameraPreview: e.cameraPreview, questionSeconds: e.questionSeconds,
+      displayMode: e.displayMode, allowBack: e.allowBack, faceMode: e.faceMode, cameraPreview: e.cameraPreview, questionSeconds: e.questionSeconds, pickCount: e.pickCount,
     };
   });
   return {
@@ -840,6 +862,8 @@ function builderSaveExam(form) {
   if (start && end && end <= start) throw new Error('The end date/time must be after the start.');
   const limit = Number(form.limitMin) || 0;
   if (limit < 0) throw new Error('Time limit cannot be negative.');
+  const pick = Math.max(0, Math.round(Number(form.pickCount) || 0));
+  if (pick > ids.length) throw new Error('"Questions per student" (' + pick + ') is more than the ' + ids.length + ' questions selected.');
 
   let examId = String(form.id || '').trim().replace(/\s+/g, '-');
   if (examId && !/^[A-Za-z0-9_-]+$/.test(examId)) throw new Error('Exam ID may contain only letters, numbers, - and _.');
@@ -862,6 +886,7 @@ function builderSaveExam(form) {
     DisplayMode: form.displayMode === 'ONE' ? 'ONE' : 'ALL',
     FaceMonitor: parseFaceMode_(form.faceMode),
     CameraPreview: form.cameraPreview !== false,
+    QuestionsPerStudent: pick,
     QuestionTimeSeconds: form.displayMode === 'ONE' ? Math.max(0, Math.round(Number(form.questionSeconds) || 0)) : 0,
     AllowBack: form.displayMode === 'ONE' ? (form.allowBack !== false && !(Number(form.questionSeconds) > 0)) : true,
   };

@@ -267,6 +267,53 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok(gas.call({ action: 'lockAnswer', attemptId: att.AttemptID, questionId: 'Q005', value: 'x' }).code === 'ALREADY_SUBMITTED', 'no locking after submit');
   await p.close();
 
+  // 14. Random set of questions per student (e.g. 10 from a pool of 30)
+  const Q = gas.sheet('Questions'); const qh = Q.data[0];
+  const pool = [];
+  for (let i = 101; i <= 130; i++) {
+    const id = 'P' + i; pool.push(id);
+    Q.appendRow(qh.map(h => ({ QuestionID: id, Type: 'MC', Question: 'Pool question ' + i, Choices: 'right | wrong | also wrong', Answer: 'A', Points: 1, Topic: 'POOL' }[h] ?? '')));
+  }
+  let err = null;
+  try { gas.ctx.builderSaveExam({ id: 'POOL-BAD', title: 'x', questionIds: pool.slice(0, 5), start: '', end: '', limitMin: 10, pickCount: 6 }); } catch (e) { err = e.message; }
+  ok(/more than the 5 questions/.test(err || ''), 'cannot ask for more questions than selected: ' + err);
+  gas.ctx.builderSaveExam({ id: 'POOL', title: 'Pool quiz', questionIds: pool, start: '', end: '', limitMin: 10, showScore: true, active: true, pickCount: 10, shuffleQuestions: false });
+  ok(gas.ctx.builderGetData().exams.find(e => e.id === 'POOL').pickCount === 10, 'pick count saved');
+  const info = gas.call({ action: 'getExam', examId: 'POOL' });
+  ok(info.exam.questionCount === 10 && info.exam.poolSize === 30 && info.exam.totalPoints === 10, 'exam info: 10 from 30, 10 points');
+  const sets = [];
+  for (let i = 1; i <= 6; i++) {
+    const st = gas.call({ action: 'start', examId: 'POOL', studentId: 'PS' + i, name: 'Pool ' + i, env });
+    const ids = st.questions.map(q => q.id);
+    ok(ids.length === 10 && ids.every(id => pool.includes(id)) && new Set(ids).size === 10, `student ${i} gets 10 different pool questions`);
+    sets.push({ st, ids });
+  }
+  ok(new Set(sets.map(x => x.ids.slice().sort().join())).size >= 5, 'students get different sets: ' + new Set(sets.map(x => x.ids.slice().sort().join())).size + ' distinct of 6');
+  ok(sets[0].ids.join() === pool.filter(id => sets[0].ids.includes(id)).join(), 'without shuffle, picked questions keep the bank order');
+  const again = gas.call({ action: 'start', examId: 'POOL', studentId: 'PS1', name: 'Pool 1', env });
+  ok(again.resumed && again.questions.map(q => q.id).join() === sets[0].ids.join(), 'same set after reconnecting');
+  const answers = {}; sets[0].st.questions.forEach(q => { answers[q.id] = q.choices.find(c => c.text === 'right').key; });
+  const graded = gas.call({ action: 'submit', attemptId: sets[0].st.attemptId, answers });
+  ok(graded.score === 10 && graded.maxScore === 10, 'graded on own 10 questions: ' + graded.score + '/' + graded.maxScore);
+  ok(gas.sheet('Responses').objects().filter(r => r.AttemptID === sets[0].st.attemptId).length === 10, '10 response rows, not 30');
+  // forward-only mode only accepts the student's own questions
+  gas.ctx.builderSaveExam({ id: 'POOL-ONE', title: 'Pool one', questionIds: pool, start: '', end: '', limitMin: 10, showScore: true, active: true, pickCount: 5, displayMode: 'ONE', allowBack: false });
+  const one = gas.call({ action: 'start', examId: 'POOL-ONE', studentId: 'PS9', name: 'x', env });
+  const notMine = pool.find(id => !one.questions.some(q => q.id === id));
+  ok(gas.call({ action: 'lockAnswer', attemptId: one.attemptId, questionId: notMine, value: '0' }).code === 'BAD_INPUT', 'cannot lock a question outside own set');
+  ok(gas.call({ action: 'lockAnswer', attemptId: one.attemptId, questionId: one.questions[0].id, value: '0' }).ok, 'can lock own question');
+  // Student page
+  p = await open('POOL');
+  await p.waitForSelector('#screen-rules:not([hidden])');
+  ok((await p.textContent('#factQuestions')) === '10 (picked at random from 30)', 'rules: ' + await p.textContent('#factQuestions'));
+  await startAs(p, 'PS20', 'Pool Page');
+  await p.waitForSelector('#screen-exam:not([hidden])');
+  ok((await p.$$('.question')).length === 10 && (await p.textContent('#progress')) === '0 / 10 answered', 'page shows 10 questions');
+  await p.close();
+  // Different points in the pool → total shown as "depends"
+  Q.set(Q.data.findIndex(r => r[qh.indexOf('QuestionID')] === 'P101') + 1, qh.indexOf('Points') + 1, 5);
+  ok(gas.call({ action: 'getExam', examId: 'POOL' }).exam.totalPoints === null, 'total points "depends" when pool points differ');
+
   ok(errors.length === 0, 'no page errors ' + errors.join(' | '));
   await browser.close(); server.close();
   console.log(failures ? failures + ' FAILURE(S)' : 'ALL PASSED');

@@ -54,6 +54,9 @@
     <div class="muted" id="tzNote"></div>
     <label for="limit">Time limit (minutes, 0 = until the exam closes)</label>
     <input type="number" id="limit" min="0" value="30">
+    <label for="pickCount">Questions per student (0 = all selected questions)</label>
+    <input type="number" id="pickCount" min="0" value="0" oninput="updateSummary()">
+    <div class="muted">e.g. tick 50 questions and enter 10: each student gets a different random 10.</div>
     <label for="displayMode">How questions are shown</label>
     <select id="displayMode" onchange="syncNav()">
       <option value="ALL">All questions on one page (scroll)</option>
@@ -189,14 +192,17 @@
     var counts = {}, pts = 0;
     selectedOrder.forEach(function (id) { var q = byId[id]; if (!q) return; counts[q.type] = (counts[q.type] || 0) + 1; pts += q.points; });
     var parts = Object.keys(counts).map(function (k) { return counts[k] + ' ' + (TYPE_LABEL[k] || k); });
-    $('selSummary').textContent = selectedOrder.length + ' selected' + (parts.length ? ' (' + parts.join(', ') + ')' : '') + ' — ' + pts + ' points';
+    var pick = Number($('pickCount').value) || 0;
+    $('selSummary').textContent = selectedOrder.length + ' selected' + (parts.length ? ' (' + parts.join(', ') + ')' : '') + ' — ' + pts + ' points' +
+      (pick > 0 && pick < selectedOrder.length ? ' — each student gets ' + pick + ' at random' : '') +
+      (pick > selectedOrder.length && selectedOrder.length ? ' — ⚠ select at least ' + pick : '');
   }
 
   function renderExams() {
     if (!DATA.exams.length) { $('examList').textContent = 'No exams yet.'; return; }
     $('examList').innerHTML = DATA.exams.map(function (e, i) {
       return '<div class="exam-item"><b>' + esc(e.title) + '</b> <span class="muted">' + esc(e.id) + (e.course ? ' · ' + esc(e.course) : '') + (e.active ? '' : ' · inactive') + '</span>' +
-        '<div class="muted">' + e.questionIds.length + ' questions · ' + (e.limitMin ? e.limitMin + ' min' : 'no limit') +
+        '<div class="muted">' + (e.pickCount && e.pickCount < e.questionIds.length ? e.pickCount + ' of ' + e.questionIds.length : e.questionIds.length) + ' questions · ' + (e.limitMin ? e.limitMin + ' min' : 'no limit') +
         (e.displayMode === 'ONE' ? ' · one at a time' + (e.allowBack ? '' : ', no going back') + (e.questionSeconds ? ', ' + e.questionSeconds + ' s per question' : '') : '') +
         (e.faceMode === 'ALWAYS' ? ' · 📷 camera monitored' + (e.cameraPreview ? '' : ' (no preview)') : e.faceMode === 'START' ? ' · 📷 face check at start' : '') +
         (e.start ? ' · opens ' + esc(e.start.replace('T', ' ')) : '') + (e.end ? ' · closes ' + esc(e.end.replace('T', ' ')) : '') + '</div>' +
@@ -212,7 +218,7 @@
     $('formTitle').textContent = 'Edit exam: ' + e.id;
     $('title').value = e.title; $('examId').value = e.id; $('examId').disabled = true; $('course').value = e.course || '';
     $('instructions').value = e.instructions; $('start').value = e.start; $('end').value = e.end;
-    $('limit').value = e.limitMin; $('shuffleQuestions').checked = e.shuffleQuestions;
+    $('limit').value = e.limitMin; $('shuffleQuestions').checked = e.shuffleQuestions; $('pickCount').value = e.pickCount || 0;
     $('shuffleChoices').checked = e.shuffleChoices; $('showScore').checked = e.showScore; $('active').checked = e.active;
     $('displayMode').value = e.displayMode || 'ALL'; $('allowBack').checked = e.allowBack !== false;
     $('questionSeconds').value = e.questionSeconds || 0; syncNav();
@@ -229,7 +235,7 @@
     ['title', 'examId', 'course', 'instructions', 'end'].forEach(function (id) { $(id).value = ''; });
     $('examId').disabled = false;
     $('start').value = DATA ? DATA.now : '';
-    $('limit').value = 30;
+    $('limit').value = 30; $('pickCount').value = 0;
     ['shuffleQuestions', 'shuffleChoices', 'showScore', 'active', 'allowBack'].forEach(function (id) { $(id).checked = true; });
     $('faceMode').value = 'ALWAYS';
     $('cameraPreview').checked = true; syncCam();
@@ -241,7 +247,7 @@
   function save() {
     var form = {
       editing: editing, id: $('examId').value, title: $('title').value, course: $('course').value, instructions: $('instructions').value,
-      start: $('start').value, end: $('end').value, limitMin: $('limit').value,
+      start: $('start').value, end: $('end').value, limitMin: $('limit').value, pickCount: $('pickCount').value,
       shuffleQuestions: $('shuffleQuestions').checked, shuffleChoices: $('shuffleChoices').checked,
       showScore: $('showScore').checked, active: $('active').checked, questionIds: selectedOrder.slice(),
       displayMode: $('displayMode').value, allowBack: $('allowBack').checked, questionSeconds: $('questionSeconds').value, faceMode: $('faceMode').value, cameraPreview: $('cameraPreview').checked
