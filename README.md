@@ -32,7 +32,7 @@ A free online exam system that needs **no database and no paid server**:
 2. Set your time zone: **File → Settings → Time zone**. All exam times use it.
 3. Open **Extensions → Apps Script**.
 4. Replace the contents of `Code.gs` with [`apps-script/Code.gs`](apps-script/Code.gs).
-5. Click **+ → HTML**, name the file **`Builder`**, and paste [`apps-script/Builder.html`](apps-script/Builder.html).
+5. Click **+ → HTML**, name the file **`Builder`**, and paste [`apps-script/Builder.html`](apps-script/Builder.html). Do the same for **`ImageUpload`** with [`apps-script/ImageUpload.html`](apps-script/ImageUpload.html).
 6. Click **Save**, then go back to the Sheet and reload it. An **Exam Admin** menu appears.
 7. Click **Exam Admin → Set up sheets (run once)**. Google asks for permission; click *Advanced → Go to project* if you see the "unverified app" warning (it's your own script).
    The script creates all the sheets, plus 8 sample questions and a sample exam called `SAMPLE-QUIZ`.
@@ -68,8 +68,22 @@ Open `https://<your-username>.github.io/WebApp-for-Online-Exam/?exam=SAMPLE-QUIZ
 | Answer | MC: the letter (`B`) or the exact choice text. TF: `TRUE`/`FALSE`. FIB: accepted answers separated by `|` (case and extra spaces are ignored). ESSAY: optional model answer, for your reference only. |
 | Points | Points for the question (default 1) |
 | Topic | Optional, used to filter in the Exam Builder |
+| Image | Optional picture: a Google Drive link, a Dropbox link, or a direct `https://` image link. The easiest way to fill it is **Exam Admin → Add image to question…** (see below). |
 
 Use **Exam Admin → Check question bank for errors** to catch mistakes. You can also paste questions in from Excel.
+
+### Pictures in questions
+Click any cell in the question's row in **Questions**, then **Exam Admin → Add image to question…**:
+- **Upload a picture.** Pictures larger than **2 MB** are shrunk automatically: reduced to at most 2000 px and saved as JPEG. Smaller JPEG and PNG files, such as diagrams, are kept as they are. Pictures are saved in your Google Drive, in the folder *Online Exam - question images*, and the link goes into the **Image** column.
+- **Or paste a link:**
+  - **Google Drive:** the file must be yours or shared with you, and 2 MB or less. It does **not** need to be public.
+  - **Dropbox:** the share link (it's converted to a direct link automatically).
+  - **Other sites:** a public, direct link to the picture itself.
+- **Remove picture** clears it.
+
+Students see the picture under the question text and can tap it to enlarge it. Drive pictures are sent through your exam server only to students taking that exam, only while the exam is in progress. Each question can have one picture; the Builder marks questions that have one with 🖼.
+
+The first time you use pictures, Google asks you to allow the script to use your Drive. After updating the script, make a **new deployment version** so students' pages can load Drive pictures.
 
 ### Creating an exam
 **Exam Admin → Exam Builder…**
@@ -206,12 +220,14 @@ The free Google tier handles a typical class (tens to a few hundred students) wi
 apps-script/
   Code.gs           backend: API, grading, teacher menu
   Builder.html      Exam Builder window shown inside Google Sheets
+  ImageUpload.html  "Add image to question" window (shrinks pictures to 2 MB)
   appsscript.json   manifest (optional, if you use clasp)
 docs/               student exam page (served by GitHub Pages)
   index.html  app.js  styles.css  config.js
 ```
 
 ## Developer tests
+`tests/images.test.js` covers question pictures: the upload window shrinking an 18.8 MB photo, links, size limits, and showing pictures to students.
 `tests/devices.test.js` covers Allowed devices with emulated iPad, iPad in desktop mode, Galaxy Tab, iPhone and Pixel.
 `tests/builder.test.js` covers picking per topic, including the real Exam Builder window with Google's parts simulated.
 `tests/timing.test.js` covers the countdowns, warnings, per-question timer, and reconnect rules.

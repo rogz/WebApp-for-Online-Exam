@@ -191,6 +191,19 @@ textarea.essay { min-height: 160px; resize: vertical; }
 .modal-backdrop.warn .modal { border: 3px solid #e0a000; text-align: center; }
 .modal-backdrop.warn h2 { color: var(--warn-text); }
 .modal-backdrop.warn .modal-actions { justify-content: center; }
+.q-image { margin: 0 0 14px; }
+.q-image img {
+  display: block; max-width: 100%; max-height: 60vh; margin: 0 auto; border-radius: 8px;
+  border: 1px solid var(--border); background: #fff; cursor: zoom-in;
+  -webkit-touch-callout: none; user-select: none; -webkit-user-select: none;
+}
+.q-image figcaption { text-align: center; font-size: 13px; color: var(--muted); margin-top: 4px; }
+.q-image .img-loading { height: 160px; border: 1px dashed var(--border); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: var(--muted); }
+.q-image .img-error { padding: 12px; border-radius: 8px; background: var(--danger-bg); color: var(--danger); text-align: center; }
+.q-image .img-error button { margin-left: 8px; }
+.modal-backdrop.zoom { background: rgba(10, 14, 22, .92); flex-direction: column; gap: 12px; cursor: zoom-out; }
+.modal-backdrop.zoom img { max-width: 100%; max-height: calc(100% - 64px); object-fit: contain; background: #fff; border-radius: 6px; -webkit-touch-callout: none; user-select: none; }
+.zoom-close { cursor: pointer; }
 .big-icon { width: 64px; height: 64px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 12px; font-size: 34px; font-weight: 700; }
 .big-icon.ok { background: var(--ok-bg); color: var(--ok); }
 .big-icon.bad { background: var(--danger-bg); color: var(--danger); }

@@ -31,7 +31,7 @@ const SHEET = {
 };
 
 const HEADERS = {
-  Questions: ['QuestionID', 'Type', 'Question', 'Choices', 'Answer', 'Points', 'Topic'],
+  Questions: ['QuestionID', 'Type', 'Question', 'Choices', 'Answer', 'Points', 'Topic', 'Image'],
   Exams: ['ExamID', 'Title', 'Instructions', 'QuestionIDs', 'StartDateTime', 'EndDateTime',
     'TimeLimitMinutes', 'ShuffleQuestions', 'ShuffleChoices', 'ShowScore', 'Active', 'Course',
     'DisplayMode', 'AllowBack', 'FaceMonitor', 'CameraPreview', 'QuestionTimeSeconds', 'QuestionsPerStudent', 'TopicCounts', 'AllowedDevices'],
@@ -65,6 +65,9 @@ const WARNABLE_EVENTS = ['NO_FACE', 'CAMERA_BLOCKED', 'MULTIPLE_FACES', 'PHONE_D
 
 /** The page pings every 20 s; allow this much extra on the server before counting a gap. */
 const PING_SLACK_MS = 30000;
+
+/** Largest image a question may have (uploads are compressed below this). */
+const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 
 const STATUS = {
   IN_PROGRESS: 'IN_PROGRESS',
@@ -367,6 +370,19 @@ const API_ = {
     });
   },
 
+  /** The picture of one of the student's own questions (Drive images only), as a data URL. */
+  image(req) {
+    const attempts = readTable_(SHEET.ATTEMPTS);
+    const a = findAttempt_(attempts, req.attemptId);
+    if (a.Status !== STATUS.IN_PROGRESS) throw blockedError_(a);
+    const exam = examConfig_(getExamRow_(a.ExamID, true));
+    const mine = attemptQuestions_(exam, examQuestions_(exam, getQuestionBank_()), a.AttemptID);
+    const q = mine.find(x => x.id === String(req.questionId || ''));
+    const fileId = q && driveFileId_(q.image);
+    if (!fileId) throw apiError_('BAD_INPUT', 'This question has no picture.');
+    return { dataUrl: driveImageDataUrl_(fileId) };
+  },
+
   /** Grades and records the submission. */
   submit(req) {
     return withLock_(() => {
@@ -573,6 +589,7 @@ function getQuestionBank_() {
       answer: r.Answer,
       points: Number(r.Points) > 0 ? Number(r.Points) : 1,
       topic: String(r.Topic || '').trim(),
+      image: String(r.Image || '').trim(),
       row: r._row,
     };
   });
@@ -686,6 +703,9 @@ function validateQuestion_(q) {
   }
   if (q.type === 'TF' && parseTF_(q.answer) === null) p.push('Answer must be TRUE or FALSE');
   if (q.type === 'FIB' && !String(q.answer).trim()) p.push('Answer is empty (separate accepted answers with |)');
+  if (q.image && !driveFileId_(q.image) && !externalImageUrl_(q.image)) {
+    p.push('Image must be a Google Drive link or a link starting with https:// (use Exam Admin → Add image to question)');
+  }
   return p;
 }
 
@@ -696,7 +716,34 @@ function publicQuestion_(q, exam, attemptId) {
     if (exam.shuffleChoices) choices = seededShuffle_(choices, attemptId + ':' + q.id);
     out.choices = choices;
   }
+  if (q.image) {
+    // Drive images are sent through this script (no public sharing needed); other links load directly.
+    if (driveFileId_(q.image)) out.image = { drive: true };
+    else if (externalImageUrl_(q.image)) out.image = { src: externalImageUrl_(q.image) };
+  }
   return out;
+}
+
+/** Google Drive file ID from a share link (or a bare ID), else null. */
+function driveFileId_(v) {
+  const s = String(v || '').trim();
+  const m = s.match(/drive\.google\.com\/(?:file\/d\/|open\?(?:[^#]*&)?id=|uc\?(?:[^#]*&)?id=|thumbnail\?(?:[^#]*&)?id=)([\w-]{20,})/) ||
+    s.match(/docs\.google\.com\/[^/]+\/d\/([\w-]{20,})/) ||
+    s.match(/googleusercontent\.com\/d\/([\w-]{20,})/);
+  if (m) return m[1];
+  return /^[\w-]{25,}$/.test(s) ? s : null;
+}
+
+/** A link students' browsers can load directly. Dropbox share links are turned into direct links. */
+function externalImageUrl_(v) {
+  const s = String(v || '').trim();
+  if (!/^https?:\/\/[^\s]+$/i.test(s) || driveFileId_(s)) return null;
+  if (/^https?:\/\/([\w-]+\.)*dropbox\.com\//i.test(s)) {
+    let u = s.replace(/([?&])dl=[01]/, '$1raw=1');
+    if (!/[?&]raw=1/.test(u)) u += (u.indexOf('?') === -1 ? '?' : '&') + 'raw=1';
+    return u;
+  }
+  return s;
 }
 
 function normType_(t) {
@@ -811,6 +858,7 @@ function onOpen() {
     .addSeparator()
     .addItem('Allow retake for selected attempt(s)', 'allowRetakeForSelection')
     .addItem('Recalculate scores (after grading essays)', 'recalculateScores')
+    .addItem('Add image to question…', 'openImageDialog')
     .addItem('Check question bank for errors', 'checkQuestionBank')
     .addToUi();
 }
@@ -911,7 +959,7 @@ function builderGetData() {
     studentAppUrl: settings.STUDENT_APP_URL,
     questions: Object.keys(bank).map(id => {
       const q = bank[id];
-      return { id: q.id, type: q.type || q.rawType, text: q.text, choices: q.choices, points: q.points, topic: q.topic, problems: validateQuestion_(q) };
+      return { id: q.id, type: q.type || q.rawType, text: q.text, choices: q.choices, points: q.points, topic: q.topic, image: !!q.image, problems: validateQuestion_(q) };
     }),
     exams: exams,
     courses: knownCourses_(),
@@ -1061,9 +1109,93 @@ function checkQuestionBank() {
   const problems = [];
   Object.keys(bank).forEach(id => {
     const p = validateQuestion_(bank[id]);
+    const fileId = driveFileId_(bank[id].image);
+    if (fileId) { try { driveImageDataUrl_(fileId); } catch (e) { p.push(e.message); } }
     if (p.length) problems.push('Row ' + bank[id].row + ' (' + id + '): ' + p.join('; '));
   });
   safeAlert_(problems.length ? 'Problems found:\n\n' + problems.join('\n') : 'All ' + Object.keys(bank).length + ' questions look good.');
+}
+
+// ───────────────────────────── Question images ─────────────────────────────
+
+/** Reads a Drive image (the teacher's own or shared with them) as a data URL. */
+function driveImageDataUrl_(fileId) {
+  let blob;
+  try { blob = DriveApp.getFileById(fileId).getBlob(); } catch (e) {
+    throw apiError_('IMAGE_UNAVAILABLE', 'A question picture could not be loaded from Google Drive (check the link, and that the file is yours or shared with you).');
+  }
+  const bytes = blob.getBytes();
+  if (bytes.length > MAX_IMAGE_BYTES) {
+    throw apiError_('IMAGE_TOO_LARGE', 'A question picture is larger than 2 MB. Add it again with Exam Admin → Add image to question, which shrinks it.');
+  }
+  const type = String(blob.getContentType() || '');
+  if (!/^image\//.test(type)) throw apiError_('IMAGE_UNAVAILABLE', 'A question picture link does not point to an image file.');
+  return 'data:' + type + ';base64,' + Utilities.base64Encode(bytes);
+}
+
+/** The Drive folder uploads go into (created on first use). */
+function imageFolder_() {
+  const props = PropertiesService.getScriptProperties();
+  const id = props.getProperty('IMAGE_FOLDER_ID');
+  if (id) { try { return DriveApp.getFolderById(id); } catch (e) { /* deleted: make a new one */ } }
+  const folder = DriveApp.createFolder('Online Exam - question images');
+  props.setProperty('IMAGE_FOLDER_ID', folder.getId());
+  return folder;
+}
+
+function openImageDialog() {
+  const sheet = ss_().getActiveSheet();
+  if (sheet.getName() !== SHEET.QUESTIONS) {
+    SpreadsheetApp.getUi().alert('Open the "Questions" sheet and click any cell in the question\'s row first.');
+    return;
+  }
+  const html = HtmlService.createHtmlOutputFromFile('ImageUpload').setWidth(560).setHeight(620);
+  SpreadsheetApp.getUi().showModalDialog(html, 'Add image to question');
+}
+
+/** Called by ImageUpload.html: the question in the selected row and its current picture. */
+function imageDialogGet() {
+  const sheet = ss_().getActiveSheet();
+  const row = sheet.getActiveRange().getRow();
+  const q = readTable_(SHEET.QUESTIONS).rows.find(r => r._row === row);
+  if (sheet.getName() !== SHEET.QUESTIONS || !q || !String(q.QuestionID).trim()) {
+    throw new Error('Click a cell in a question\'s row in the Questions sheet, then open this window again.');
+  }
+  const image = String(q.Image || '').trim();
+  let preview = '', previewError = '';
+  if (driveFileId_(image)) { try { preview = driveImageDataUrl_(driveFileId_(image)); } catch (e) { previewError = e.message; } }
+  else if (externalImageUrl_(image)) preview = externalImageUrl_(image);
+  return { id: String(q.QuestionID).trim(), text: String(q.Question), image: image, preview: preview, previewError: previewError };
+}
+
+/**
+ * Called by ImageUpload.html. payload is one of:
+ *   { dataUrl, name }  – an uploaded picture (already shrunk below 2 MB in the browser)
+ *   { link }           – a Google Drive / Dropbox / direct image link
+ *   { remove: true }   – no picture
+ */
+function imageDialogSave(questionId, payload) {
+  const table = readTable_(SHEET.QUESTIONS);
+  const q = table.rows.find(r => String(r.QuestionID).trim() === String(questionId));
+  if (!q) throw new Error('Question ' + questionId + ' was not found.');
+  let value = '';
+  if (payload && payload.dataUrl) {
+    const m = String(payload.dataUrl).match(/^data:(image\/(?:jpeg|png|gif|webp));base64,([A-Za-z0-9+/=]+)$/);
+    if (!m) throw new Error('That file is not a JPEG, PNG, GIF or WebP picture.');
+    const bytes = Utilities.base64Decode(m[2]);
+    if (bytes.length > MAX_IMAGE_BYTES) throw new Error('The picture is still larger than 2 MB. Try a smaller picture.');
+    const ext = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp' }[m[1]];
+    const file = imageFolder_().createFile(Utilities.newBlob(bytes, m[1], String(questionId) + '-' + Date.now() + '.' + ext));
+    value = file.getUrl();
+  } else if (payload && payload.link) {
+    value = String(payload.link).trim();
+    if (!driveFileId_(value) && !externalImageUrl_(value)) throw new Error('Paste a Google Drive link, a Dropbox link, or a direct link that starts with https://');
+    if (driveFileId_(value)) driveImageDataUrl_(driveFileId_(value)); // check it can be read and is ≤ 2 MB
+  } else if (!(payload && payload.remove)) {
+    throw new Error('Choose a picture or paste a link first.');
+  }
+  updateFields_(table, q, { Image: value });
+  return { image: value };
 }
 
 // ───────────────────────────── Sheet helpers ─────────────────────────────

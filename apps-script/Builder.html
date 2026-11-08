@@ -179,7 +179,7 @@
       var extra = q.type === 'MC' ? '<div class="muted">' + q.choices.map(function (c, i) { return String.fromCharCode(65 + i) + '. ' + esc(c); }).join(' &nbsp; ') + '</div>' : '';
       return '<tr class="' + (bad ? 'bad' : '') + '"><td><input type="checkbox" ' + (selected[q.id] ? 'checked ' : '') + (bad ? 'disabled ' : '') +
         'data-id="' + esc(q.id) + '" onchange="toggle(this.getAttribute(\'data-id\'), this.checked)"></td><td>' + esc(q.id) + '</td><td><span class="tag">' +
-        esc(TYPE_LABEL[q.type] || q.type) + '</span></td><td>' + esc(q.text) + extra +
+        esc(TYPE_LABEL[q.type] || q.type) + '</span></td><td>' + (q.image ? '🖼 ' : '') + esc(q.text) + extra +
         (bad ? '<div style="color:#c5221f">⚠ ' + esc(q.problems.join('; ')) + '</div>' : '') +
         '</td><td>' + q.points + '</td><td>' + esc(q.topic) + '</td></tr>';
     }).join('') : '<tr><td colspan="6" class="muted">No questions match.</td></tr>';

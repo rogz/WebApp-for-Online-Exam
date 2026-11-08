@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; }
+  body { font: 13px/1.45 Arial, Helvetica, sans-serif; color: #202124; margin: 0; }
+  h3 { margin: 0 0 4px; font-size: 14px; }
+  .q { background: #f1f3f4; border-radius: 6px; padding: 8px 10px; margin-bottom: 12px; white-space: pre-wrap; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+  .tabs button { flex: 1; }
+  .tabs button.on { background: #e8f0fe; border-color: #1a73e8; color: #1a56c4; font-weight: bold; }
+  .pane { min-height: 96px; }
+  label { display: block; font-weight: bold; font-size: 12px; margin: 6px 0 4px; }
+  input[type=text] { width: 100%; padding: 7px; border: 1px solid #c4c7c5; border-radius: 4px; font: inherit; }
+  button { padding: 7px 12px; border-radius: 4px; border: 1px solid #c4c7c5; background: #fff; cursor: pointer; font: inherit; }
+  button.primary { background: #1a73e8; color: #fff; border-color: #1a73e8; font-weight: bold; }
+  button.danger { color: #c5221f; }
+  button:disabled { opacity: .5; cursor: default; }
+  .muted { color: #5f6368; font-size: 12px; }
+  .preview { margin-top: 10px; border: 1px dashed #c4c7c5; border-radius: 6px; min-height: 160px; display: flex; align-items: center; justify-content: center; background: #fafafa; }
+  .preview img { max-width: 100%; max-height: 240px; display: block; }
+  .actions { display: flex; gap: 8px; justify-content: space-between; margin-top: 12px; }
+  .msg { margin-top: 10px; padding: 8px; border-radius: 4px; display: none; }
+  .msg.ok { display: block; background: #e6f4ea; color: #137333; }
+  .msg.err { display: block; background: #fce8e6; color: #c5221f; }
+  .msg.info { display: block; background: #e8f0fe; color: #1a56c4; }
+</style>
+</head>
+<body>
+  <h3 id="qTitle">Loading…</h3>
+  <div class="q" id="qText"></div>
+
+  <div class="tabs">
+    <button type="button" id="tabUpload" class="on" onclick="tab('upload')">Upload a picture</button>
+    <button type="button" id="tabLink" onclick="tab('link')">Paste a link</button>
+  </div>
+
+  <div class="pane" id="paneUpload">
+    <input type="file" id="file" accept="image/*" onchange="pickFile(this.files[0])">
+    <div class="muted" style="margin-top:6px">Pictures larger than 2 MB are shrunk automatically. They are saved in your Google Drive, in a folder named "Online Exam - question images", and stay private: students see them only during the exam.</div>
+  </div>
+
+  <div class="pane" id="paneLink" hidden>
+    <label for="link">Image link</label>
+    <input type="text" id="link" placeholder="https://drive.google.com/file/d/…  or  https://www.dropbox.com/…" oninput="linkChanged()">
+    <div class="muted" style="margin-top:6px">
+      <b>Google Drive:</b> any link to a picture in your Drive (it doesn't need to be shared publicly). Must be 2 MB or less.<br>
+      <b>Dropbox:</b> the file's share link.<br>
+      <b>Other sites:</b> a direct link to the picture itself (ending in .jpg, .png…), shared publicly.
+    </div>
+  </div>
+
+  <div class="preview" id="preview"><span class="muted">No picture</span></div>
+  <div class="muted" id="sizeNote"></div>
+  <div id="msg" class="msg"></div>
+
+  <div class="actions">
+    <button type="button" class="danger" id="removeBtn" onclick="removeImage()">Remove picture</button>
+    <span>
+      <button type="button" onclick="google.script.host.close()">Close</button>
+      <button type="button" class="primary" id="saveBtn" onclick="save()" disabled>Save</button>
+    </span>
+  </div>
+
+<script>
+  var MAX = 2 * 1024 * 1024;
+  var Q = null;
+  var pending = null; // { dataUrl, name } or { link }
+
+  function $(id) { return document.getElementById(id); }
+  function show(kind, text) { var m = $('msg'); m.className = 'msg ' + kind; m.textContent = text; }
+  function kb(n) { return n >= 1048576 ? (n / 1048576).toFixed(2) + ' MB' : Math.round(n / 1024) + ' KB'; }
+  function dataUrlBytes(u) { var b64 = u.slice(u.indexOf(',') + 1); return Math.floor(b64.length * 3 / 4) - (b64.slice(-2) === '==' ? 2 : b64.slice(-1) === '=' ? 1 : 0); }
+
+  function setPreview(src) {
+    $('preview').innerHTML = '';
+    if (!src) { $('preview').innerHTML = '<span class="muted">No picture</span>'; return; }
+    var img = document.createElement('img');
+    img.alt = 'Question picture';
+    img.onerror = function () { $('preview').innerHTML = '<span class="muted">This link could not be shown. Check that it is a direct link to a picture and is shared publicly.</span>'; };
+    img.src = src;
+    $('preview').appendChild(img);
+  }
+
+  function tab(name) {
+    $('paneUpload').hidden = name !== 'upload';
+    $('paneLink').hidden = name !== 'link';
+    $('tabUpload').classList.toggle('on', name === 'upload');
+    $('tabLink').classList.toggle('on', name === 'link');
+  }
+
+  function readAsDataUrl(file) {
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader();
+      r.onload = function () { resolve(r.result); };
+      r.onerror = function () { reject(new Error('The file could not be read.')); };
+      r.readAsDataURL(file);
+    });
+  }
+
+  function loadImage(src) {
+    return new Promise(function (resolve, reject) {
+      var img = new Image();
+      img.onload = function () { resolve(img); };
+      img.onerror = function () { reject(new Error('That file is not a picture this browser can open (use JPEG or PNG).')); };
+      img.src = src;
+    });
+  }
+
+  /** Shrinks a picture to JPEG under 2 MB: lower quality first, then smaller size. */
+  function compress(img) {
+    var maxSide = 2000, quality = 0.88, url, w, h;
+    for (var i = 0; i < 20; i++) {
+      var scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+      w = Math.max(1, Math.round(img.naturalWidth * scale));
+      h = Math.max(1, Math.round(img.naturalHeight * scale));
+      var c = document.createElement('canvas'); c.width = w; c.height = h;
+      var g = c.getContext('2d');
+      g.fillStyle = '#ffffff'; g.fillRect(0, 0, w, h); // transparent areas become white
+      g.drawImage(img, 0, 0, w, h);
+      url = c.toDataURL('image/jpeg', quality);
+      if (dataUrlBytes(url) <= MAX * 0.95) break;
+      if (quality > 0.6) quality -= 0.1; else maxSide = Math.round(maxSide * 0.8);
+    }
+    return { dataUrl: url, width: w, height: h };
+  }
+
+  function pickFile(file) {
+    if (!file) return;
+    pending = null; $('saveBtn').disabled = true; show('info', 'Preparing picture…');
+    var keep = file.size <= MAX && /^image\/(jpeg|png|gif|webp)$/.test(file.type);
+    readAsDataUrl(file).then(function (url) {
+      return loadImage(url).then(function (img) {
+        if (keep) return { dataUrl: url, width: img.naturalWidth, height: img.naturalHeight, kept: true };
+        return compress(img);
+      });
+    }).then(function (r) {
+      var bytes = dataUrlBytes(r.dataUrl);
+      if (bytes > MAX) throw new Error('This picture could not be made smaller than 2 MB.');
+      pending = { dataUrl: r.dataUrl, name: file.name };
+      setPreview(r.dataUrl);
+      $('sizeNote').textContent = r.kept
+        ? 'Original kept: ' + kb(bytes) + ', ' + r.width + ' × ' + r.height + ' px'
+        : 'Shrunk from ' + kb(file.size) + ' to ' + kb(bytes) + ' (' + r.width + ' × ' + r.height + ' px)';
+      show('info', 'Click Save to attach this picture to ' + Q.id + '.');
+      $('saveBtn').disabled = false;
+    }).catch(function (e) { show('err', e.message); });
+  }
+
+  function linkChanged() {
+    var v = $('link').value.trim();
+    pending = v ? { link: v } : null;
+    $('saveBtn').disabled = !v;
+    $('sizeNote').textContent = '';
+    $('msg').className = 'msg';
+    // Drive links are checked when you click Save; other links can be previewed here
+    if (/^https?:\/\//i.test(v) && !/drive\.google\.com|docs\.google\.com/.test(v)) {
+      setPreview(/dropbox\.com\//i.test(v) ? v.replace(/([?&])dl=[01]/, '$1raw=1') + (/[?&](raw|dl)=/.test(v) ? '' : (v.indexOf('?') === -1 ? '?' : '&') + 'raw=1') : v);
+    } else {
+      setPreview('');
+    }
+  }
+
+  function save() {
+    if (!pending) return;
+    $('saveBtn').disabled = true; show('info', 'Saving…');
+    google.script.run.withSuccessHandler(function () {
+      show('ok', 'Saved. Question ' + Q.id + ' now has this picture. You can close this window.');
+      pending = null;
+    }).withFailureHandler(function (e) {
+      $('saveBtn').disabled = false; show('err', (e && e.message) || String(e));
+    }).imageDialogSave(Q.id, pending);
+  }
+
+  function removeImage() {
+    $('removeBtn').disabled = true;
+    google.script.run.withSuccessHandler(function () {
+      $('removeBtn').disabled = false; pending = null; $('saveBtn').disabled = true;
+      setPreview(''); $('sizeNote').textContent = ''; $('file').value = ''; $('link').value = '';
+      show('ok', 'Picture removed from ' + Q.id + '.');
+    }).withFailureHandler(function (e) { $('removeBtn').disabled = false; show('err', (e && e.message) || String(e)); })
+      .imageDialogSave(Q.id, { remove: true });
+  }
+
+  google.script.run.withSuccessHandler(function (q) {
+    Q = q;
+    $('qTitle').textContent = 'Question ' + q.id;
+    $('qText').textContent = q.text;
+    setPreview(q.preview);
+    if (q.previewError) show('err', q.previewError);
+    else if (q.image) $('sizeNote').textContent = 'Current picture: ' + (q.image.length > 70 ? q.image.slice(0, 70) + '…' : q.image);
+  }).withFailureHandler(function (e) {
+    $('qTitle').textContent = 'No question selected';
+    show('err', (e && e.message) || String(e));
+    $('saveBtn').disabled = true; $('removeBtn').disabled = true;
+  }).imageDialogGet();
+</script>
+</body>
+</html>

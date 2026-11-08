@@ -410,6 +410,7 @@
     $('examTitle2').textContent = state.info.exam.title;
     $('studentLine').textContent = state.student.name + ' · ' + state.student.id + (r.isRetake ? ' · Retake' : '') + (r.resumed ? ' · Resumed' : '');
     renderQuestions();
+    loadDriveImages();
     show('exam');
     if (state.oneAtATime) setupPager();
     if (state.rules.blockCopyPaste) document.body.classList.add('locked');
@@ -458,6 +459,7 @@
       const text = document.createElement('p');
       text.className = 'q-text';
       li.appendChild(text);
+      if (q.image) li.appendChild(questionImage(q));
 
       const saved = state.answers[q.id];
 
@@ -527,6 +529,89 @@
       ol.appendChild(li);
     });
     updateProgress();
+  }
+
+  // ───────── Question pictures ─────────
+
+  /** A picture under the question text. Drive pictures arrive from the server after the exam starts. */
+  function questionImage(q) {
+    const fig = document.createElement('figure');
+    fig.className = 'q-image';
+    fig.dataset.id = q.id;
+    if (q.image.src) {
+      showImage(fig, q.image.src, false);
+    } else {
+      const ph = document.createElement('div');
+      ph.className = 'img-loading';
+      ph.textContent = 'Loading picture…';
+      fig.appendChild(ph);
+    }
+    return fig;
+  }
+
+  function showImage(fig, src, fromServer) {
+    fig.textContent = '';
+    const img = document.createElement('img');
+    img.alt = 'Picture for this question';
+    img.draggable = false;
+    img.addEventListener('click', () => openZoom(img.src));
+    img.addEventListener('error', () => imageFailed(fig, fromServer ? null : src));
+    img.src = src;
+    const cap = document.createElement('figcaption');
+    cap.textContent = 'Tap or click the picture to enlarge it';
+    fig.append(img, cap);
+  }
+
+  function imageFailed(fig, retrySrc) {
+    fig.textContent = '';
+    const box = document.createElement('div');
+    box.className = 'img-error';
+    box.textContent = 'The picture for this question could not be loaded.';
+    const btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'btn'; btn.textContent = 'Try again';
+    btn.addEventListener('click', () => {
+      if (retrySrc) showImage(fig, retrySrc + (retrySrc.indexOf('?') === -1 ? '?' : '&') + 'retry=' + Date.now(), false);
+      else fetchDriveImage(fig);
+    });
+    box.appendChild(btn);
+    fig.appendChild(box);
+  }
+
+  function fetchDriveImage(fig) {
+    fig.textContent = '';
+    const ph = document.createElement('div');
+    ph.className = 'img-loading'; ph.textContent = 'Loading picture…';
+    fig.appendChild(ph);
+    return api('image', { attemptId: state.attemptId, questionId: fig.dataset.id }, 3)
+      .then((r) => showImage(fig, r.dataUrl, true))
+      .catch((e) => {
+        if (e.code === 'VOIDED') { showVoid(null, e.message); return; }
+        imageFailed(fig, null);
+        if (e.code === 'IMAGE_TOO_LARGE' || e.code === 'IMAGE_UNAVAILABLE') fig.querySelector('.img-error').firstChild.textContent = e.message + ' Please tell your instructor.';
+      });
+  }
+
+  /** Loads Drive pictures two at a time, in question order (the current question first). */
+  function loadDriveImages() {
+    const figs = Array.from(document.querySelectorAll('.q-image')).filter((f) => f.querySelector('.img-loading'));
+    if (state.oneAtATime) {
+      const cur = state.questions[state.index] && state.questions[state.index].id;
+      figs.sort((a, b) => (a.dataset.id === cur ? -1 : b.dataset.id === cur ? 1 : 0));
+    }
+    let i = 0;
+    const next = () => (i < figs.length && !state.voided ? fetchDriveImage(figs[i++]).then(next) : null);
+    next(); next();
+  }
+
+  function openZoom(src) {
+    $('imgZoomImg').src = src;
+    $('imgZoom').hidden = false;
+    $('imgZoomClose').focus();
+  }
+
+  function closeZoom() {
+    $('imgZoom').hidden = true;
+    $('imgZoomImg').removeAttribute('src');
   }
 
   function setAnswer(id, value) {
@@ -789,6 +874,7 @@
     clearInterval(state.pingId);
     $('connBanner').hidden = true;
     stopCamera();
+    closeZoom();
     document.body.classList.remove('locked');
     try { localStorage.removeItem(storageKey()); } catch (e) { /* ignore */ }
   }
@@ -864,6 +950,7 @@
     $('voidTime').textContent = new Date().toLocaleString();
     $('voidRef').textContent = state.attemptId ? state.attemptId.slice(0, 8).toUpperCase() : '';
     $('questions').textContent = ''; // hide the questions
+    closeZoom();
     $('voidModal').hidden = false;
   }
 
@@ -974,6 +1061,8 @@
     $('faceWarnOk').addEventListener('click', closeFaceWarning);
     $('camRestartBtn').addEventListener('click', () => { window.ExamCamera.restart().catch(() => {}); });
     $('prevBtn').addEventListener('click', goPrev);
+    $('imgZoom').addEventListener('click', closeZoom);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('imgZoom').hidden) closeZoom(); });
 
     if (!API_URL || API_URL.indexOf('PASTE_') === 0) {
       showError('This exam page is not set up yet: the instructor needs to put the Apps Script Web App URL in config.js.');
