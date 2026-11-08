@@ -57,6 +57,8 @@
     <label for="pickCount">Questions per student (0 = all selected questions)</label>
     <input type="number" id="pickCount" min="0" value="0" oninput="updateSummary()">
     <div class="muted">e.g. tick 50 questions and enter 10: each student gets a different random 10.</div>
+    <label>Or pick per topic <span class="muted">(optional; replaces the number above)</span></label>
+    <div id="topicPicks" class="muted">Tick questions that have a Topic to pick a number from each topic.</div>
     <label for="displayMode">How questions are shown</label>
     <select id="displayMode" onchange="syncNav()">
       <option value="ALL">All questions on one page (scroll)</option>
@@ -118,6 +120,7 @@
   var selected = {};      // id -> true
   var selectedOrder = []; // keeps the order the teacher picked
   var editing = false;
+  var topicPick = {}; // topic -> how many each student gets
   var TYPE_LABEL = { MC: 'MC', TF: 'T/F', FIB: 'Blank', ESSAY: 'Essay' };
 
   function $(id) { return document.getElementById(id); }
@@ -173,10 +176,15 @@
         (bad ? '<div style="color:#c5221f">⚠ ' + esc(q.problems.join('; ')) + '</div>' : '') +
         '</td><td>' + q.points + '</td><td>' + esc(q.topic) + '</td></tr>';
     }).join('') : '<tr><td colspan="6" class="muted">No questions match.</td></tr>';
+    // The "select all" box shows whether everything currently listed is ticked
+    var selectable = qs.filter(function (q) { return !q.problems.length; });
+    $('checkAll').checked = selectable.length > 0 && selectable.every(function (q) { return selected[q.id]; });
+    renderTopicPicks();
     updateSummary();
   }
 
   function toggle(id, on) {
+    setTimeout(renderTopicPicks, 0);
     if (on && !selected[id]) { selected[id] = true; selectedOrder.push(id); }
     if (!on && selected[id]) { delete selected[id]; selectedOrder = selectedOrder.filter(function (x) { return x !== id; }); }
     updateSummary();
@@ -187,11 +195,48 @@
     renderBank();
   }
 
+  /** One number box per topic among the ticked questions. */
+  function renderTopicPicks() {
+    var byId = {}; DATA.questions.forEach(function (q) { byId[q.id] = q; });
+    var avail = {};
+    selectedOrder.forEach(function (id) { var q = byId[id]; if (q && q.topic) avail[q.topic] = (avail[q.topic] || 0) + 1; });
+    var topics = Object.keys(avail).sort();
+    if (!topics.length) { $('topicPicks').innerHTML = 'Tick questions that have a Topic to pick a number from each topic.'; return; }
+    $('topicPicks').innerHTML = '<table><thead><tr><th>Topic</th><th>Ticked</th><th>Each student gets</th></tr></thead><tbody>' +
+      topics.map(function (t) {
+        return '<tr><td>' + esc(t) + '</td><td>' + avail[t] + '</td><td><input type="number" min="0" max="' + avail[t] +
+          '" style="width:70px" data-topic="' + esc(t) + '" value="' + (topicPick[t] || '') + '" placeholder="0" ' +
+          'oninput="setTopicPick(this.getAttribute(\'data-topic\'), this.value)"></td></tr>';
+      }).join('') + '</tbody></table>';
+  }
+
+  function setTopicPick(topic, value) {
+    var n = Math.max(0, Math.round(Number(value) || 0));
+    if (n) topicPick[topic] = n; else delete topicPick[topic];
+    updateSummary();
+  }
+
+  function activeTopicPicks() {
+    var byId = {}; DATA.questions.forEach(function (q) { byId[q.id] = q; });
+    var present = {};
+    selectedOrder.forEach(function (id) { var q = byId[id]; if (q && q.topic) present[q.topic] = true; });
+    return Object.keys(topicPick).filter(function (t) { return present[t] && topicPick[t] > 0; })
+      .map(function (t) { return { topic: t, count: topicPick[t] }; });
+  }
+
   function updateSummary() {
     var byId = {}; DATA.questions.forEach(function (q) { byId[q.id] = q; });
     var counts = {}, pts = 0;
     selectedOrder.forEach(function (id) { var q = byId[id]; if (!q) return; counts[q.type] = (counts[q.type] || 0) + 1; pts += q.points; });
     var parts = Object.keys(counts).map(function (k) { return counts[k] + ' ' + (TYPE_LABEL[k] || k); });
+    var tps = activeTopicPicks();
+    $('pickCount').disabled = tps.length > 0;
+    if (tps.length) {
+      var total = tps.reduce(function (a, tc) { return a + tc.count; }, 0);
+      $('selSummary').textContent = selectedOrder.length + ' selected — each student gets ' + total + ' at random: ' +
+        tps.map(function (tc) { return tc.count + ' ' + tc.topic; }).join(', ');
+      return;
+    }
     var pick = Number($('pickCount').value) || 0;
     $('selSummary').textContent = selectedOrder.length + ' selected' + (parts.length ? ' (' + parts.join(', ') + ')' : '') + ' — ' + pts + ' points' +
       (pick > 0 && pick < selectedOrder.length ? ' — each student gets ' + pick + ' at random' : '') +
@@ -202,7 +247,9 @@
     if (!DATA.exams.length) { $('examList').textContent = 'No exams yet.'; return; }
     $('examList').innerHTML = DATA.exams.map(function (e, i) {
       return '<div class="exam-item"><b>' + esc(e.title) + '</b> <span class="muted">' + esc(e.id) + (e.course ? ' · ' + esc(e.course) : '') + (e.active ? '' : ' · inactive') + '</span>' +
-        '<div class="muted">' + (e.pickCount && e.pickCount < e.questionIds.length ? e.pickCount + ' of ' + e.questionIds.length : e.questionIds.length) + ' questions · ' + (e.limitMin ? e.limitMin + ' min' : 'no limit') +
+        '<div class="muted">' + (e.topicCounts && e.topicCounts.length
+          ? e.topicCounts.reduce(function (a, tc) { return a + tc.count; }, 0) + ' of ' + e.questionIds.length + ' (' + e.topicCounts.map(function (tc) { return tc.count + ' ' + esc(tc.topic); }).join(', ') + ')'
+          : (e.pickCount && e.pickCount < e.questionIds.length ? e.pickCount + ' of ' + e.questionIds.length : e.questionIds.length)) + ' questions · ' + (e.limitMin ? e.limitMin + ' min' : 'no limit') +
         (e.displayMode === 'ONE' ? ' · one at a time' + (e.allowBack ? '' : ', no going back') + (e.questionSeconds ? ', ' + e.questionSeconds + ' s per question' : '') : '') +
         (e.faceMode === 'ALWAYS' ? ' · 📷 camera monitored' + (e.cameraPreview ? '' : ' (no preview)') : e.faceMode === 'START' ? ' · 📷 face check at start' : '') +
         (e.start ? ' · opens ' + esc(e.start.replace('T', ' ')) : '') + (e.end ? ' · closes ' + esc(e.end.replace('T', ' ')) : '') + '</div>' +
@@ -219,6 +266,7 @@
     $('title').value = e.title; $('examId').value = e.id; $('examId').disabled = true; $('course').value = e.course || '';
     $('instructions').value = e.instructions; $('start').value = e.start; $('end').value = e.end;
     $('limit').value = e.limitMin; $('shuffleQuestions').checked = e.shuffleQuestions; $('pickCount').value = e.pickCount || 0;
+    topicPick = {}; (e.topicCounts || []).forEach(function (tc) { topicPick[tc.topic] = tc.count; });
     $('shuffleChoices').checked = e.shuffleChoices; $('showScore').checked = e.showScore; $('active').checked = e.active;
     $('displayMode').value = e.displayMode || 'ALL'; $('allowBack').checked = e.allowBack !== false;
     $('questionSeconds').value = e.questionSeconds || 0; syncNav();
@@ -235,7 +283,7 @@
     ['title', 'examId', 'course', 'instructions', 'end'].forEach(function (id) { $(id).value = ''; });
     $('examId').disabled = false;
     $('start').value = DATA ? DATA.now : '';
-    $('limit').value = 30; $('pickCount').value = 0;
+    $('limit').value = 30; $('pickCount').value = 0; topicPick = {};
     ['shuffleQuestions', 'shuffleChoices', 'showScore', 'active', 'allowBack'].forEach(function (id) { $(id).checked = true; });
     $('faceMode').value = 'ALWAYS';
     $('cameraPreview').checked = true; syncCam();
@@ -247,7 +295,7 @@
   function save() {
     var form = {
       editing: editing, id: $('examId').value, title: $('title').value, course: $('course').value, instructions: $('instructions').value,
-      start: $('start').value, end: $('end').value, limitMin: $('limit').value, pickCount: $('pickCount').value,
+      start: $('start').value, end: $('end').value, limitMin: $('limit').value, pickCount: $('pickCount').value, topicCounts: activeTopicPicks(),
       shuffleQuestions: $('shuffleQuestions').checked, shuffleChoices: $('shuffleChoices').checked,
       showScore: $('showScore').checked, active: $('active').checked, questionIds: selectedOrder.slice(),
       displayMode: $('displayMode').value, allowBack: $('allowBack').checked, questionSeconds: $('questionSeconds').value, faceMode: $('faceMode').value, cameraPreview: $('cameraPreview').checked

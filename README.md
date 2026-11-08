@@ -84,6 +84,7 @@ Use **Exam Admin → Check question bank for errors** to catch mistakes. You can
 - **Questions per student** (0 = all): tick a pool, e.g. 50 questions, and enter 10. **Each student gets their own random 10.**
   - A student keeps the same set if they reconnect, and is graded only on their own questions.
   - Combine it with **Shuffle question order** to also mix up the order.
+  - **Or pick per topic:** after ticking questions, the Builder lists each Topic with how many you ticked. Enter how many each student gets from each, e.g. 5 Easy, 3 Medium, 2 Hard. Every student gets that mix, drawn at random inside each topic. This replaces *Questions per student*, and it's stored in the `TopicCounts` column as `Easy: 5 | Medium: 3 | Hard: 2`.
   - Tip: give pool questions the same points so every student's total is the same. The rules screen shows *"10 (picked at random from 50)"*.
 - Options: shuffle questions, shuffle choices, show the score after submitting, active.
 - Click **Save exam**, then **Copy student link**.
@@ -207,6 +208,7 @@ docs/               student exam page (served by GitHub Pages)
 ```
 
 ## Developer tests
+`tests/builder.test.js` covers picking per topic, including the real Exam Builder window with Google's parts simulated.
 `tests/timing.test.js` covers the countdowns, warnings, per-question timer, and reconnect rules.
 `tests/camera.test.js` runs the camera flow with the real MediaPipe detector and a fake webcam. See the comments at the top of the file for setup.
 

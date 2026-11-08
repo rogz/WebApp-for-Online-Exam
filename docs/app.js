@@ -259,7 +259,9 @@
     $('examInstructions').textContent = exam.instructions;
     $('examInstructions').hidden = !exam.instructions;
     const types = { MC: 'multiple choice', TF: 'true/false', FIB: 'fill in the blank', ESSAY: 'essay' };
-    $('factQuestions').textContent = exam.poolSize
+    $('factQuestions').textContent = exam.topicBreakdown
+      ? exam.questionCount + ' (' + exam.topicBreakdown.map((t) => t.count + ' ' + t.topic).join(', ') + ', picked at random from ' + exam.poolSize + ')'
+      : exam.poolSize
       ? exam.questionCount + ' (picked at random from ' + exam.poolSize + ')'
       : exam.questionCount + ' (' + Object.keys(exam.typeCounts).map((k) => exam.typeCounts[k] + ' ' + (types[k] || k)).join(', ') + ')';
     $('factPoints').textContent = exam.totalPoints === null ? 'Depends on your questions' : exam.totalPoints;

@@ -34,7 +34,7 @@ const HEADERS = {
   Questions: ['QuestionID', 'Type', 'Question', 'Choices', 'Answer', 'Points', 'Topic'],
   Exams: ['ExamID', 'Title', 'Instructions', 'QuestionIDs', 'StartDateTime', 'EndDateTime',
     'TimeLimitMinutes', 'ShuffleQuestions', 'ShuffleChoices', 'ShowScore', 'Active', 'Course',
-    'DisplayMode', 'AllowBack', 'FaceMonitor', 'CameraPreview', 'QuestionTimeSeconds', 'QuestionsPerStudent'],
+    'DisplayMode', 'AllowBack', 'FaceMonitor', 'CameraPreview', 'QuestionTimeSeconds', 'QuestionsPerStudent', 'TopicCounts'],
   Roster: ['StudentID', 'Name', 'Email', 'AccessCode', 'Courses'],
   Attempts: ['AttemptID', 'ExamID', 'StudentID', 'Name', 'Status', 'StartedAt', 'Deadline',
     'SubmittedAt', 'Score', 'MaxScore', 'Percent', 'PendingEssays', 'Late', 'VoidReason',
@@ -113,6 +113,7 @@ const API_ = {
     const exam = examConfig_(getExamRow_(req.examId));
     const bank = getQuestionBank_();
     const questions = examQuestions_(exam, bank);
+    const summary = setSummary_(exam, questions);
     const settings = getSettings_();
     const roster = readTable_(SHEET.ROSTER).rows.filter(r => String(r.StudentID).trim() !== '');
     const tz = tz_();
@@ -128,13 +129,11 @@ const API_ = {
         questionSeconds: exam.questionSeconds,
         allowBack: exam.allowBack,
         instructions: exam.instructions,
-        questionCount: exam.pickCount > 0 ? Math.min(exam.pickCount, questions.length) : questions.length,
-        poolSize: exam.pickCount > 0 && exam.pickCount < questions.length ? questions.length : null,
-        // With a random set per student, points/types can differ between students
-        totalPoints: exam.pickCount > 0 && exam.pickCount < questions.length
-          ? (questions.every(q => q.points === questions[0].points) ? exam.pickCount * questions[0].points : null)
-          : sum_(questions.map(q => q.points)),
-        typeCounts: exam.pickCount > 0 && exam.pickCount < questions.length ? null : countBy_(questions, q => q.type),
+        questionCount: summary.count,
+        poolSize: summary.poolSize,
+        totalPoints: summary.totalPoints,
+        typeCounts: summary.typeCounts,
+        topicBreakdown: summary.topicBreakdown,
         timeLimitMinutes: exam.limitMin,
         startMs: exam.start ? exam.start.getTime() : null,
         endMs: exam.end ? exam.end.getTime() : null,
@@ -537,6 +536,7 @@ function examConfig_(row) {
     cameraPreview: toBool_(row.CameraPreview, true),
     questionSeconds: Math.max(0, Math.round(Number(row.QuestionTimeSeconds) || 0)),
     pickCount: Math.max(0, Math.round(Number(row.QuestionsPerStudent) || 0)),
+    topicCounts: parseTopicCounts_(row.TopicCounts),
   };
   // "No going back" only makes sense when questions are shown one at a time
   cfg.allowBack = cfg.displayMode === 'ONE' ? toBool_(row.AllowBack, true) : true;
@@ -574,12 +574,56 @@ function getQuestionBank_() {
  */
 function attemptQuestions_(exam, pool, attemptId) {
   let qs = pool;
-  if (exam.pickCount > 0 && exam.pickCount < pool.length) {
+  if (exam.topicCounts.length) {
+    // "Pick X from each topic": a separate random draw inside each listed topic
+    const picked = {};
+    exam.topicCounts.forEach(tc => {
+      const inTopic = pool.filter(q => normTopic_(q.topic) === normTopic_(tc.topic));
+      seededShuffle_(inTopic, attemptId + ':pick:' + normTopic_(tc.topic)).slice(0, tc.count).forEach(q => { picked[q.id] = true; });
+    });
+    qs = pool.filter(q => picked[q.id]);
+  } else if (exam.pickCount > 0 && exam.pickCount < pool.length) {
     const picked = {};
     seededShuffle_(pool, attemptId + ':pick').slice(0, exam.pickCount).forEach(q => { picked[q.id] = true; });
     qs = pool.filter(q => picked[q.id]);
   }
   return exam.shuffleQuestions ? seededShuffle_(qs, String(attemptId)) : qs;
+}
+
+/** "Easy: 5 | Hard: 3" → [{ topic: 'Easy', count: 5 }, { topic: 'Hard', count: 3 }] */
+function parseTopicCounts_(v) {
+  return String(v || '').split('|').map(part => {
+    const i = part.lastIndexOf(':');
+    if (i === -1) return null;
+    const topic = part.slice(0, i).trim();
+    const count = Math.round(Number(part.slice(i + 1)));
+    return topic && count > 0 ? { topic: topic, count: count } : null;
+  }).filter(Boolean);
+}
+
+function normTopic_(t) { return String(t || '').trim().toLowerCase().replace(/\s+/g, ' '); }
+
+/** What students are told about the question set (count, pool, points). */
+function setSummary_(exam, pool) {
+  const samePoints = qs => qs.length > 0 && qs.every(q => q.points === qs[0].points);
+  if (exam.topicCounts.length) {
+    let count = 0, points = 0, fixed = true;
+    const breakdown = exam.topicCounts.map(tc => {
+      const inTopic = pool.filter(q => normTopic_(q.topic) === normTopic_(tc.topic));
+      const n = Math.min(tc.count, inTopic.length);
+      count += n;
+      if (n === inTopic.length) points += sum_(inTopic.map(q => q.points));
+      else if (samePoints(inTopic)) points += n * inTopic[0].points;
+      else fixed = false;
+      return { topic: tc.topic, count: n, available: inTopic.length };
+    });
+    return { count: count, poolSize: pool.length, totalPoints: fixed ? points : null, typeCounts: null, topicBreakdown: breakdown };
+  }
+  if (exam.pickCount > 0 && exam.pickCount < pool.length) {
+    // With a random set per student, points/types can differ between students
+    return { count: exam.pickCount, poolSize: pool.length, totalPoints: samePoints(pool) ? exam.pickCount * pool[0].points : null, typeCounts: null, topicBreakdown: null };
+  }
+  return { count: pool.length, poolSize: null, totalPoints: sum_(pool.map(q => q.points)), typeCounts: countBy_(pool, q => q.type), topicBreakdown: null };
 }
 
 function examQuestions_(exam, bank) {
@@ -819,7 +863,7 @@ function builderGetData() {
       end: e.end ? Utilities.formatDate(e.end, tz, "yyyy-MM-dd'T'HH:mm") : '',
       limitMin: e.limitMin, shuffleQuestions: e.shuffleQuestions, shuffleChoices: e.shuffleChoices,
       showScore: e.showScore, active: toBool_(r.Active, true), link: examLink_(e.id, settings),
-      displayMode: e.displayMode, allowBack: e.allowBack, faceMode: e.faceMode, cameraPreview: e.cameraPreview, questionSeconds: e.questionSeconds, pickCount: e.pickCount,
+      displayMode: e.displayMode, allowBack: e.allowBack, faceMode: e.faceMode, cameraPreview: e.cameraPreview, questionSeconds: e.questionSeconds, pickCount: e.pickCount, topicCounts: e.topicCounts,
     };
   });
   return {
@@ -862,7 +906,13 @@ function builderSaveExam(form) {
   if (start && end && end <= start) throw new Error('The end date/time must be after the start.');
   const limit = Number(form.limitMin) || 0;
   if (limit < 0) throw new Error('Time limit cannot be negative.');
-  const pick = Math.max(0, Math.round(Number(form.pickCount) || 0));
+  const topicCounts = (form.topicCounts || []).map(tc => ({ topic: String(tc.topic || '').trim(), count: Math.round(Number(tc.count) || 0) }))
+    .filter(tc => tc.topic && tc.count > 0);
+  topicCounts.forEach(tc => {
+    const available = ids.filter(id => normTopic_(bank[id].topic) === normTopic_(tc.topic)).length;
+    if (tc.count > available) throw new Error('Topic "' + tc.topic + '": you asked for ' + tc.count + ' but only ' + available + ' selected question(s) have that topic.');
+  });
+  const pick = topicCounts.length ? 0 : Math.max(0, Math.round(Number(form.pickCount) || 0));
   if (pick > ids.length) throw new Error('"Questions per student" (' + pick + ') is more than the ' + ids.length + ' questions selected.');
 
   let examId = String(form.id || '').trim().replace(/\s+/g, '-');
@@ -887,6 +937,7 @@ function builderSaveExam(form) {
     FaceMonitor: parseFaceMode_(form.faceMode),
     CameraPreview: form.cameraPreview !== false,
     QuestionsPerStudent: pick,
+    TopicCounts: asText_(topicCounts.map(tc => tc.topic + ': ' + tc.count).join(' | ')),
     QuestionTimeSeconds: form.displayMode === 'ONE' ? Math.max(0, Math.round(Number(form.questionSeconds) || 0)) : 0,
     AllowBack: form.displayMode === 'ONE' ? (form.allowBack !== false && !(Number(form.questionSeconds) > 0)) : true,
   };
