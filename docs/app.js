@@ -22,8 +22,18 @@
     voided: false,
     submitting: false,
     violations: [],
-    warned5: false,
-    warned1: false,
+    warned: new Set(),   // time warnings already shown (minutes)
+    qEndAt: null,        // per-question deadline (one-at-a-time with a time limit per question)
+    unloading: false,    // the page is closing or reloading (reconnect allowed)
+    disconnectSent: false,
+    hiddenTimer: null,
+    lastOkAt: 0,         // last successful contact with the server
+    offlineSince: null,  // when the connection was lost
+    oneAtATime: false,   // show one question at a time
+    allowBack: true,     // may return to earlier questions (one-at-a-time mode)
+    index: 0,            // current question in one-at-a-time mode
+    locked: new Set(),   // questions that can no longer be changed
+    cam: { required: false, continuous: false, warnings: 0, warningOpen: false, offenseArmed: true },
   };
 
   // ───────── API ─────────
@@ -85,6 +95,27 @@
 
   // ───────── Monitor & browser checks ─────────
 
+  /**
+   * 'computer' | 'tablet' | 'phone'. iPads ask for desktop pages and report "Macintosh",
+   * so a touch screen on a Mac means iPad.
+   */
+  function deviceType() {
+    const ua = navigator.userAgent || '';
+    const touch = navigator.maxTouchPoints || 0;
+    if (/iPhone|iPod|Windows Phone/i.test(ua) || (/Android/i.test(ua) && /Mobile/i.test(ua))) return 'phone';
+    if (/iPad/i.test(ua) || (/Macintosh/i.test(ua) && touch > 1) || /Android/i.test(ua) || /Tablet/i.test(ua)) return 'tablet';
+    if (navigator.userAgentData && navigator.userAgentData.mobile) return 'phone';
+    return 'computer';
+  }
+
+  const DEVICE_NAME = { computer: 'Computer', tablet: 'Tablet', phone: 'Phone' };
+
+  function deviceAllowed() {
+    const allowed = (state.info && state.info.exam.allowedDevices) || 'COMPUTER';
+    const d = deviceType();
+    return allowed === 'ANY' || d === 'computer' || (allowed === 'TABLET' && d === 'tablet');
+  }
+
   /** 'single' | 'multiple' | 'unsupported' */
   function monitorStatus() {
     if (!window.screen || !('isExtended' in window.screen)) return 'unsupported';
@@ -100,6 +131,18 @@
   }
 
   function preChecksPass() {
+    const d = deviceType();
+    const allowed = state.info.exam.allowedDevices || 'COMPUTER';
+    const devOk = deviceAllowed();
+    setCheck('checkDevice', devOk, DEVICE_NAME[d] + (devOk ? ''
+      : allowed === 'TABLET' ? ' — this exam must be taken on a computer or a tablet, not a phone.'
+        : ' — this exam must be taken on a laptop or desktop computer.'));
+    if (d !== 'computer') {
+      // Tablets and phones: no second-monitor check; leaving the exam app still voids it.
+      setCheck('checkBrowser', true, 'Supported');
+      setCheck('checkMonitor', true, 'Not checked on ' + (d === 'tablet' ? 'tablets' : 'phones'));
+      return devOk && cameraCheckPasses();
+    }
     const m = monitorStatus();
     const browserOk = m !== 'unsupported' || !state.rules.requireMonitorCheck;
     setCheck('checkBrowser', browserOk, m === 'unsupported'
@@ -111,7 +154,102 @@
     else setCheck('checkMonitor', m === 'single', m === 'single'
       ? 'One screen detected'
       : 'A second monitor is connected. Disconnect it to start the exam.');
-    return browserOk && m !== 'multiple';
+    return devOk && browserOk && m !== 'multiple' && cameraCheckPasses();
+  }
+
+  // ───────── Camera ─────────
+
+  const CAM_TEXT = {
+    OFF: 'Camera off',
+    LOADING: 'Loading face detection…',
+    OK: '✓ Face detected',
+    NO_FACE: 'No face detected',
+    CAMERA_BLOCKED: 'Camera is covered or too dark',
+    MULTIPLE_FACES: 'More than one person in view',
+    PHONE_DETECTED: 'Phone detected',
+    CAMERA_OFF: 'Camera turned off',
+  };
+  const CAM_HELP = {
+    NO_FACE: 'Make sure your whole face is visible and well lit, facing the screen.',
+    CAMERA_BLOCKED: 'Uncover the camera and make sure the room is bright enough.',
+    MULTIPLE_FACES: 'Only you may be in front of the camera.',
+    PHONE_DETECTED: 'Put your phone away, out of the camera\'s view.',
+    CAMERA_OFF: 'Your camera stopped. Turn it back on to continue.',
+  };
+
+  function cameraCheckPasses() {
+    if (!state.cam.required) return true;
+    const st = window.ExamCamera.status();
+    setCheck('checkCamera', st === 'OK', st === 'OK' ? 'Face detected'
+      : st === 'OFF' ? 'Turn on your camera below.'
+        : st === 'LOADING' ? 'Loading face detection…' : CAM_TEXT[st] + '. ' + (CAM_HELP[st] || ''));
+    return st === 'OK';
+  }
+
+  function paintCamBadge(boxId, badgeId, st) {
+    const box = $(boxId);
+    box.classList.toggle('ok', st === 'OK');
+    box.classList.toggle('bad', st !== 'OK' && st !== 'LOADING' && st !== 'OFF');
+    $(badgeId).textContent = CAM_TEXT[st] || st;
+  }
+
+  async function turnOnCamera() {
+    $('camBtn').disabled = true;
+    $('camError').hidden = true;
+    try {
+      await window.ExamCamera.start($('camVideo'), { phoneDetection: state.rules.phoneDetection, onStatus: onCamStatus });
+      $('camBtn').hidden = true;
+    } catch (e) {
+      $('camError').textContent = e.message;
+      $('camError').hidden = false;
+      $('camBtn').disabled = false;
+    }
+    refreshStartButton();
+  }
+
+  /** Called by camera.js about twice a second. */
+  function onCamStatus(st, ageMs) {
+    paintCamBadge('camBox', 'camBadge', st);
+    $('camIndicator').classList.toggle('bad', st !== 'OK');
+    $('camIndicator').textContent = st === 'OK' ? '📷 Camera on' : '📷 ' + (CAM_TEXT[st] || st);
+    if (!state.attemptId) { refreshStartButton(); return; }
+    if (state.cam.warningOpen) {
+      paintCamBadge('faceWarnBox', 'faceWarnBadge', st);
+      $('faceWarnOk').disabled = st !== 'OK';
+      $('camRestartBtn').hidden = st !== 'CAMERA_OFF';
+      return;
+    }
+    if (!state.active || !state.cam.continuous) return;
+    if (st === 'OK') { state.cam.offenseArmed = true; return; }
+    if (st === 'LOADING' || st === 'OFF' || !state.cam.offenseArmed) return;
+    const graceMs = st === 'CAMERA_OFF' ? 0 : Math.max(1, state.rules.faceGraceSeconds || 3) * 1000;
+    if (ageMs >= graceMs) cameraOffense(st, CAM_TEXT[st] + ' for ' + Math.round(ageMs / 1000) + ' s.');
+  }
+
+  /** 1st offense: warning. 2nd offense: void. The server applies the same rule. */
+  function cameraOffense(event, detail) {
+    state.cam.offenseArmed = false;
+    state.cam.warnings++;
+    if (state.cam.warnings >= 2) { voidExam(event, detail); return; }
+    showFaceWarning(event);
+    api('violation', { attemptId: state.attemptId, event, detail }, 3)
+      .then((r) => { if (r.status === 'VOIDED') { state.violations.push({ event, detail }); showVoid(event); } })
+      .catch((e) => { if (e.code === 'VOIDED') showVoid(event); else beacon('violation', { attemptId: state.attemptId, event, detail }); });
+  }
+
+  function showFaceWarning(event) {
+    state.cam.warningOpen = true;
+    $('faceWarnReason').textContent = REASONS[event] || CAM_TEXT[event];
+    window.ExamCamera.mirrorTo($('faceWarnVideo'));
+    $('faceWarnOk').disabled = true;
+    $('faceWarnModal').hidden = false;
+  }
+
+  function closeFaceWarning() {
+    if (window.ExamCamera.status() !== 'OK') return;
+    $('faceWarnModal').hidden = true;
+    state.cam.warningOpen = false;
+    state.cam.offenseArmed = true;
   }
 
   function windowStatusNow() {
@@ -129,7 +267,10 @@
     const n = $('windowNotice');
     if (ws === 'NOT_YET_OPEN') {
       n.hidden = false; n.className = 'notice';
-      n.textContent = 'This exam is not open yet. It opens on ' + state.info.exam.startText + '. This page will let you start once it opens.';
+      const until = state.info.exam.startMs - (Date.now() + state.serverOffset);
+      n.textContent = state.rules.openCountdown
+        ? 'This exam opens in ' + fmtCountdown(until) + ' (' + state.info.exam.startText + '). Keep this page open: you can start as soon as it opens.'
+        : 'This exam is not open yet. It opens on ' + state.info.exam.startText + '. This page will let you start once it opens.';
     } else if (ws === 'CLOSED') {
       n.hidden = false; n.className = 'notice bad';
       n.textContent = 'This exam closed on ' + state.info.exam.endText + '. If your instructor allowed you a retake, you can still start.';
@@ -151,12 +292,52 @@
     $('examInstructions').textContent = exam.instructions;
     $('examInstructions').hidden = !exam.instructions;
     const types = { MC: 'multiple choice', TF: 'true/false', FIB: 'fill in the blank', ESSAY: 'essay' };
-    $('factQuestions').textContent = exam.questionCount + ' (' + Object.keys(exam.typeCounts).map((k) => exam.typeCounts[k] + ' ' + (types[k] || k)).join(', ') + ')';
-    $('factPoints').textContent = exam.totalPoints;
+    $('factQuestions').textContent = exam.topicBreakdown
+      ? exam.questionCount + ' (' + exam.topicBreakdown.map((t) => t.count + ' ' + t.topic).join(', ') + ', picked at random from ' + exam.poolSize + ')'
+      : exam.poolSize
+      ? exam.questionCount + ' (picked at random from ' + exam.poolSize + ')'
+      : exam.questionCount + ' (' + Object.keys(exam.typeCounts).map((k) => exam.typeCounts[k] + ' ' + (types[k] || k)).join(', ') + ')';
+    $('factPoints').textContent = exam.totalPoints === null ? 'Depends on your questions' : exam.totalPoints;
     $('factLimit').textContent = exam.timeLimitMinutes ? exam.timeLimitMinutes + ' minutes' : 'No limit (until the exam closes)';
     $('factWindow').textContent = (exam.startText ? 'From ' + exam.startText : 'Now') + (exam.endText ? ' until ' + exam.endText : '');
     $('accessCodeWrap').hidden = !state.info.requiresAccessCode;
     $('rulePaste').hidden = !rules.blockCopyPaste;
+    if (deviceType() !== 'computer') {
+      $('ruleMonitor').innerHTML = '<b>Stay in this browser.</b> Switching to another app, going to the home screen, or opening another tab will void your exam.';
+    }
+    state.cam.required = exam.faceMode === 'START' || exam.faceMode === 'ALWAYS';
+    state.cam.continuous = exam.faceMode === 'ALWAYS';
+    $('ruleCamera').hidden = !state.cam.required;
+    $('checkCamera').hidden = !state.cam.required;
+    $('cameraPanel').hidden = !state.cam.required;
+    if (state.cam.continuous) {
+      $('ruleCamera').innerHTML = '📷 <b>Your camera will be monitored throughout the exam.</b> Keep your face clearly visible. ' +
+        'If your face is hidden, the camera is covered, another person appears, or a phone is seen, you get <b>one warning</b>. ' +
+        'The second time, <b>your exam is voided</b>.';
+      $('agreeText').textContent = 'I have read the rules. I understand that switching tabs or windows or using a second monitor will void my exam, ' +
+        'and that my camera is monitored: I get one warning, and a second camera problem will void my exam.';
+    } else if (state.cam.required) {
+      $('ruleCamera').innerHTML = '📷 <b>Your face must be visible to the camera before you can start.</b> Sit facing the screen in a well-lit place, with only you in view.';
+      $('camHelp').textContent = 'Turn on your camera so we can check that your face is visible. The camera turns off when the exam starts.';
+    }
+    const rs = rules.reconnectSeconds || 0;
+    if (rs > 0) {
+      $('ruleReload').innerHTML = '<b>If your internet drops or the page reloads</b>, reopen the same exam link within <b>' + fmtDuration(rs) +
+        '</b> to continue (up to ' + rules.maxReconnects + ' time' + (rules.maxReconnects === 1 ? '' : 's') + '). Your timer keeps running. ' +
+        'Taking longer voids your exam. <b>Do not close or reload this page on purpose.</b>';
+    }
+    if (exam.questionSeconds > 0) {
+      $('ruleNav').hidden = false;
+      $('ruleNav').innerHTML = 'Questions are shown <b>one at a time</b>, with <b>' + fmtDuration(exam.questionSeconds) + ' per question</b>. ' +
+        'When the time is up, the exam moves on automatically. <b>You cannot go back</b> to earlier questions.';
+    }
+    const nav = $('ruleNav');
+    if (exam.displayMode === 'ONE' && !(exam.questionSeconds > 0)) {
+      nav.hidden = false;
+      nav.innerHTML = exam.allowBack
+        ? 'Questions are shown <b>one at a time</b>. You can go back to earlier questions before submitting.'
+        : 'Questions are shown <b>one at a time</b>. <b>You cannot go back</b> to a question once you click <i>Next</i>, so answer each one before moving on.';
+    }
     show('rules');
     refreshStartButton();
   }
@@ -184,8 +365,10 @@
         accessCode: $('accessCode').value.trim(),
         env: {
           userAgent: navigator.userAgent,
+          device: deviceType(),
           isExtended: m === 'multiple',
           monitorCheck: m === 'unsupported' ? 'unsupported' : 'supported',
+          camera: state.cam.required && window.ExamCamera.status() === 'OK' ? 'ok' : 'none',
         },
       }, 2);
       busy(false);
@@ -215,15 +398,42 @@
       try { state.answers = JSON.parse(localStorage.getItem(storageKey()) || '{}') || {}; } catch (e) { state.answers = {}; }
     }
     state.endAt = r.remainingMs === null || r.remainingMs === undefined ? null : Date.now() + r.remainingMs;
+    // Skip warnings longer than the time available (no "5 minutes left" on a 3-minute exam)
+    if (state.endAt !== null) (state.rules.timeWarnings || []).forEach((m) => { if (m * 60000 >= r.remainingMs) state.warned.add(m); });
+
+    state.oneAtATime = state.info.exam.displayMode === 'ONE';
+    state.allowBack = !state.oneAtATime || state.info.exam.allowBack !== false;
+    state.locked = new Set(state.allowBack ? [] : (r.lockedIds || []));
+    const firstOpen = state.questions.findIndex((q) => !state.locked.has(q.id));
+    state.index = firstOpen === -1 ? state.questions.length - 1 : firstOpen;
 
     $('examTitle2').textContent = state.info.exam.title;
     $('studentLine').textContent = state.student.name + ' · ' + state.student.id + (r.isRetake ? ' · Retake' : '') + (r.resumed ? ' · Resumed' : '');
     renderQuestions();
+    loadDriveImages();
     show('exam');
+    if (state.oneAtATime) setupPager();
     if (state.rules.blockCopyPaste) document.body.classList.add('locked');
     state.active = true;
+    if (state.cam.required && !state.cam.continuous) {
+      window.ExamCamera.stop(); // face was checked at the start only
+    } else if (state.cam.continuous) {
+      $('camFloat').appendChild($('camBox')); // moving the element pauses it, so resume
+      $('camFloat').hidden = false;
+      const preview = state.info.exam.cameraPreview !== false;
+      $('camFloat').classList.toggle('preview-off', !preview);
+      $('camIndicator').hidden = preview;
+      window.ExamCamera.resume();
+    }
     tick();
     state.timerId = setInterval(tick, 250);
+    state.lastOkAt = Date.now();
+    if (state.rules.reconnectSeconds > 0) state.pingId = setInterval(ping, 20000);
+    if (r.resumed && state.rules.reconnectSeconds > 0) {
+      const w = $('timeWarning');
+      w.hidden = false; w.className = 'notice';
+      w.textContent = 'Reconnected — you can continue. Reconnects used: ' + r.reconnects + ' of ' + state.rules.maxReconnects + '. Your timer kept running while you were away.';
+    }
     // A monitor may have been connected while the start request was in flight
     checkMonitorDuringExam();
   }
@@ -231,7 +441,7 @@
   function renderQuestions() {
     const ol = $('questions');
     ol.textContent = '';
-    state.questions.forEach((q) => {
+    state.questions.forEach((q, qi) => {
       const li = document.createElement('li');
       li.className = 'card question';
       li.dataset.id = q.id;
@@ -239,6 +449,7 @@
       const head = document.createElement('div');
       head.className = 'q-head';
       const num = document.createElement('span'); num.className = 'q-num';
+      num.textContent = 'Question ' + (qi + 1);
       const meta = document.createElement('span'); meta.className = 'q-meta';
       meta.textContent = ({ MC: 'Multiple choice', TF: 'True or false', FIB: 'Fill in the blank', ESSAY: 'Essay' }[q.type]) +
         ' · ' + q.points + (q.points === 1 ? ' point' : ' points');
@@ -248,6 +459,7 @@
       const text = document.createElement('p');
       text.className = 'q-text';
       li.appendChild(text);
+      if (q.image) li.appendChild(questionImage(q));
 
       const saved = state.answers[q.id];
 
@@ -319,6 +531,89 @@
     updateProgress();
   }
 
+  // ───────── Question pictures ─────────
+
+  /** A picture under the question text. Drive pictures arrive from the server after the exam starts. */
+  function questionImage(q) {
+    const fig = document.createElement('figure');
+    fig.className = 'q-image';
+    fig.dataset.id = q.id;
+    if (q.image.src) {
+      showImage(fig, q.image.src, false);
+    } else {
+      const ph = document.createElement('div');
+      ph.className = 'img-loading';
+      ph.textContent = 'Loading picture…';
+      fig.appendChild(ph);
+    }
+    return fig;
+  }
+
+  function showImage(fig, src, fromServer) {
+    fig.textContent = '';
+    const img = document.createElement('img');
+    img.alt = 'Picture for this question';
+    img.draggable = false;
+    img.addEventListener('click', () => openZoom(img.src));
+    img.addEventListener('error', () => imageFailed(fig, fromServer ? null : src));
+    img.src = src;
+    const cap = document.createElement('figcaption');
+    cap.textContent = 'Tap or click the picture to enlarge it';
+    fig.append(img, cap);
+  }
+
+  function imageFailed(fig, retrySrc) {
+    fig.textContent = '';
+    const box = document.createElement('div');
+    box.className = 'img-error';
+    box.textContent = 'The picture for this question could not be loaded.';
+    const btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'btn'; btn.textContent = 'Try again';
+    btn.addEventListener('click', () => {
+      if (retrySrc) showImage(fig, retrySrc + (retrySrc.indexOf('?') === -1 ? '?' : '&') + 'retry=' + Date.now(), false);
+      else fetchDriveImage(fig);
+    });
+    box.appendChild(btn);
+    fig.appendChild(box);
+  }
+
+  function fetchDriveImage(fig) {
+    fig.textContent = '';
+    const ph = document.createElement('div');
+    ph.className = 'img-loading'; ph.textContent = 'Loading picture…';
+    fig.appendChild(ph);
+    return api('image', { attemptId: state.attemptId, questionId: fig.dataset.id }, 3)
+      .then((r) => showImage(fig, r.dataUrl, true))
+      .catch((e) => {
+        if (e.code === 'VOIDED') { showVoid(null, e.message); return; }
+        imageFailed(fig, null);
+        if (e.code === 'IMAGE_TOO_LARGE' || e.code === 'IMAGE_UNAVAILABLE') fig.querySelector('.img-error').firstChild.textContent = e.message + ' Please tell your instructor.';
+      });
+  }
+
+  /** Loads Drive pictures two at a time, in question order (the current question first). */
+  function loadDriveImages() {
+    const figs = Array.from(document.querySelectorAll('.q-image')).filter((f) => f.querySelector('.img-loading'));
+    if (state.oneAtATime) {
+      const cur = state.questions[state.index] && state.questions[state.index].id;
+      figs.sort((a, b) => (a.dataset.id === cur ? -1 : b.dataset.id === cur ? 1 : 0));
+    }
+    let i = 0;
+    const next = () => (i < figs.length && !state.voided ? fetchDriveImage(figs[i++]).then(next) : null);
+    next(); next();
+  }
+
+  function openZoom(src) {
+    $('imgZoomImg').src = src;
+    $('imgZoom').hidden = false;
+    $('imgZoomClose').focus();
+  }
+
+  function closeZoom() {
+    $('imgZoom').hidden = true;
+    $('imgZoomImg').removeAttribute('src');
+  }
+
   function setAnswer(id, value) {
     state.answers[id] = value;
     saveLocal();
@@ -336,6 +631,103 @@
     $('progress').textContent = t;
     $('progress2').textContent = t;
     document.querySelectorAll('.question').forEach((li) => li.classList.toggle('answered', isAnswered(li.dataset.id)));
+    document.querySelectorAll('#palette button').forEach((b) => b.classList.toggle('answered', isAnswered(b.dataset.id)));
+  }
+
+  // ───────── One question at a time ─────────
+
+  function setupPager() {
+    $('pager').hidden = false;
+    $('submitBar').hidden = true;
+    const pal = $('palette');
+    pal.textContent = '';
+    pal.hidden = !state.allowBack;
+    if (state.allowBack) {
+      state.questions.forEach((q, i) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = String(i + 1);
+        b.dataset.id = q.id;
+        b.setAttribute('aria-label', 'Go to question ' + (i + 1));
+        b.addEventListener('click', () => showQuestion(i));
+        pal.appendChild(b);
+      });
+    }
+    state.locked.forEach((id) => lockInputs(id));
+    updateProgress();
+    showQuestion(state.index);
+  }
+
+  function showQuestion(i) {
+    state.index = Math.max(0, Math.min(i, state.questions.length - 1));
+    const id = state.questions[state.index].id;
+    document.querySelectorAll('.question').forEach((li) => { li.hidden = li.dataset.id !== id; });
+    document.querySelectorAll('#palette button').forEach((b, j) => b.classList.toggle('current', j === state.index));
+    const last = state.index === state.questions.length - 1;
+    $('pagerCount').textContent = 'Question ' + (state.index + 1) + ' of ' + state.questions.length;
+    $('prevBtn').hidden = !state.allowBack;
+    $('prevBtn').disabled = state.index === 0;
+    $('nextBtn').textContent = last ? 'Submit exam' : 'Next →';
+    const qs = state.info.exam.questionSeconds || 0;
+    state.qEndAt = qs > 0 ? Date.now() + qs * 1000 : null;
+    $('qTimer').hidden = !(qs > 0);
+    window.scrollTo(0, 0);
+  }
+
+  function lockInputs(id) {
+    const li = document.querySelector('.question[data-id="' + CSS.escape(id) + '"]');
+    if (!li) return;
+    li.classList.add('locked');
+    li.querySelectorAll('input, textarea').forEach((el) => { el.disabled = true; });
+  }
+
+  function goNext() {
+    if (!state.active) return;
+    const q = state.questions[state.index];
+    const last = state.index === state.questions.length - 1;
+    if (last) { askSubmit(); return; }
+    const advance = () => advanceFrom(q);
+    if (!state.allowBack && !isAnswered(q.id)) {
+      confirmBox('Skip this question?', 'You have not answered Question ' + (state.index + 1) +
+        '. You cannot come back to it after moving on.', 'Skip it', 'Go back', advance);
+      return;
+    }
+    advance();
+  }
+
+  function advanceFrom(q) {
+    if (!state.active || state.questions[state.index] !== q) return;
+    if (!state.allowBack) {
+      state.locked.add(q.id);
+      lockInputs(q.id);
+      const value = state.answers[q.id] === undefined ? '' : state.answers[q.id];
+      sendReliably('lockAnswer', { attemptId: state.attemptId, questionId: q.id, value });
+    }
+    showQuestion(state.index + 1);
+  }
+
+  /** Time per question ran out: move on (or submit on the last question). */
+  function questionTimeUp() {
+    state.qEndAt = null;
+    const q = state.questions[state.index];
+    if (confirmAction) { $('confirmModal').hidden = true; confirmAction = null; }
+    if (state.index === state.questions.length - 1) { submitExam(true); return; }
+    advanceFrom(q);
+  }
+
+  function goPrev() {
+    if (state.active && state.allowBack) showQuestion(state.index - 1);
+  }
+
+  let confirmAction = null;
+  function confirmBox(title, text, yesLabel, noLabel, onYes) {
+    $('confirmTitle').textContent = title;
+    $('confirmText').textContent = text;
+    $('confirmYes').textContent = yesLabel;
+    $('confirmNo').textContent = noLabel;
+    confirmAction = onYes;
+    $('confirmModal').hidden = false;
+    $('confirmNo').focus();
   }
 
   function fmtTime(ms) {
@@ -345,32 +737,110 @@
     return (h ? h + ':' + pad(m) : pad(m)) + ':' + pad(sec);
   }
 
+  /** "2 d 03:15:20", "1:05:30", "04:59" */
+  function fmtCountdown(ms) {
+    const s = Math.max(0, Math.ceil(ms / 1000));
+    const d = Math.floor(s / 86400);
+    return (d ? d + (d === 1 ? ' day ' : ' days ') : '') + fmtTime((s % 86400) * 1000);
+  }
+
+  /** 60 → "1 minute", 90 → "1 min 30 s", 45 → "45 seconds" */
+  function fmtDuration(sec) {
+    const m = Math.floor(sec / 60), r = sec % 60;
+    if (!m) return sec + (sec === 1 ? ' second' : ' seconds');
+    if (!r) return m + (m === 1 ? ' minute' : ' minutes');
+    return m + ' min ' + r + ' s';
+  }
+
   function tick() {
     if (!state.active) return;
+    tickConnection();
+    if (!state.active) return;
+    if (state.qEndAt !== null) {
+      const ql = state.qEndAt - Date.now();
+      $('qTimer').textContent = '⏱ ' + fmtTime(ql);
+      $('qTimer').classList.toggle('low', ql <= 10000);
+      if (ql <= 0) { questionTimeUp(); return; }
+    }
     const el = $('timer');
     if (state.endAt === null) { el.textContent = 'No time limit'; return; }
     const left = state.endAt - Date.now();
     el.textContent = fmtTime(left);
     el.classList.toggle('low', left <= 60000);
-    const warn = $('timeWarning');
-    if (left <= 300000 && !state.warned5 && left > 60000) {
-      state.warned5 = true; warn.hidden = false; warn.textContent = '5 minutes left. Your answers will be submitted automatically when time runs out.';
-    }
-    if (left <= 60000 && !state.warned1) {
-      state.warned1 = true; warn.hidden = false; warn.className = 'notice bad'; warn.textContent = 'Less than 1 minute left!';
+    // Teacher-chosen warnings, e.g. [10, 5, 1] minutes before the end
+    const due = (state.rules.timeWarnings || []).filter((m) => left <= m * 60000 && !state.warned.has(m));
+    if (due.length && left > 0) {
+      const m = Math.min.apply(null, due);
+      state.rules.timeWarnings.forEach((x) => { if (x >= m) state.warned.add(x); });
+      const smallest = Math.min.apply(null, state.rules.timeWarnings);
+      const warn = $('timeWarning');
+      warn.hidden = false;
+      warn.className = m === smallest ? 'notice bad' : 'notice warn';
+      warn.textContent = (m < 1 ? Math.round(m * 60) + ' seconds' : m + (m === 1 ? ' minute' : ' minutes')) +
+        ' left. Your answers will be submitted automatically when time runs out.';
     }
     if (left <= 0) submitExam(true);
+  }
+
+  // ───────── Connection & reconnect ─────────
+
+  function markOnline() {
+    state.lastOkAt = Date.now();
+    if (state.offlineSince !== null) {
+      state.offlineSince = null;
+      $('connBanner').hidden = true;
+    }
+  }
+
+  function markOffline(since) {
+    if (state.offlineSince === null) state.offlineSince = since || Date.now();
+  }
+
+  async function ping() {
+    if (!state.active || !(state.rules.reconnectSeconds > 0)) return;
+    try {
+      const r = await api('ping', { attemptId: state.attemptId });
+      markOnline();
+      if (r.status === 'VOIDED') showVoid(null, 'Your exam was voided: ' + (r.reason || 'exam rules were broken') + '. Please inform your instructor.');
+    } catch (e) {
+      if (e.code === 'NETWORK') markOffline(state.lastOkAt);
+    }
+  }
+
+  /** Shows the "connection lost" banner and voids the exam if the limit passes. */
+  function tickConnection() {
+    const rs = state.rules.reconnectSeconds || 0;
+    if (!(rs > 0) || state.offlineSince === null) return;
+    const left = rs * 1000 - (Date.now() - state.offlineSince);
+    const b = $('connBanner');
+    b.hidden = false;
+    b.textContent = '⚠ Connection lost — trying to reconnect… Keep this page open. ' +
+      'If you are not back online within ' + fmtTime(left) + ', your exam will be voided.';
+    if (Date.now() - (state.lastRetryAt || 0) > 5000) { state.lastRetryAt = Date.now(); ping(); }
+    if (left <= 0 && !state.submitting) voidExam('CONNECTION_LOST', 'Offline for more than ' + rs + ' s.');
+  }
+
+  /** Sends now, or keeps retrying every 5 s while offline (up to 10 minutes). */
+  function sendReliably(action, payload) {
+    let tries = 0;
+    const attempt = () => api(action, payload).then((r) => { markOnline(); return r; }).catch((e) => {
+      if (e.code === 'VOIDED') { showVoid(null, e.message); return; }
+      if (e.code !== 'NETWORK') return;
+      markOffline(state.lastOkAt);
+      if (++tries < 120) setTimeout(attempt, 5000);
+      else beacon(action, payload);
+    });
+    attempt();
   }
 
   // ───────── Submit ─────────
 
   function askSubmit() {
     const unanswered = state.questions.map((q, i) => (isAnswered(q.id) ? null : i + 1)).filter(Boolean);
-    $('confirmText').textContent = unanswered.length
+    confirmBox('Submit your exam?', unanswered.length
       ? 'You have ' + unanswered.length + ' unanswered question(s): #' + unanswered.join(', #') + '. You cannot change your answers after submitting.'
-      : 'You answered all questions. You cannot change your answers after submitting.';
-    $('confirmModal').hidden = false;
-    $('confirmNo').focus();
+      : 'You answered all questions. You cannot change your answers after submitting.',
+    'Submit now', 'Keep answering', () => submitExam(false));
   }
 
   async function submitExam(auto) {
@@ -401,6 +871,10 @@
   function finishExam() {
     state.active = false;
     clearInterval(state.timerId);
+    clearInterval(state.pingId);
+    $('connBanner').hidden = true;
+    stopCamera();
+    closeZoom();
     document.body.classList.remove('locked');
     try { localStorage.removeItem(storageKey()); } catch (e) { /* ignore */ }
   }
@@ -426,10 +900,16 @@
     LEFT_WINDOW: 'You left the exam window (for example, Alt+Tab to another application).',
     SECOND_MONITOR: 'A second monitor was connected during the exam.',
     PAGE_CLOSED: 'You closed or reloaded the exam page.',
+    NO_FACE: 'Your face was not visible to the camera.',
+    CAMERA_BLOCKED: 'Your camera was covered or blocked.',
+    MULTIPLE_FACES: 'More than one person was in front of the camera.',
+    PHONE_DETECTED: 'A mobile phone was seen on camera.',
+    CAMERA_OFF: 'Your camera was turned off or disconnected.',
+    CONNECTION_LOST: 'Your internet connection was lost for longer than allowed.',
   };
 
   function voidExam(event, detail) {
-    if (!state.active || state.voided) return;
+    if (!state.active || state.voided || state.unloading) return;
     state.voided = true;
     state.active = false;
     clearInterval(state.timerId);
@@ -438,18 +918,30 @@
 
     if (document.visibilityState === 'hidden') {
       // The page may be closing: a beacon is delivered even if the tab is gone.
-      if (!beacon('violation', payload)) api('violation', payload, 3).catch(() => {});
+      if (!beacon('violation', payload)) sendReliably('violation', payload);
     } else {
-      api('violation', payload, 3).catch(() => beacon('violation', payload));
+      sendReliably('violation', payload);
     }
     try { localStorage.removeItem(storageKey()); } catch (e) { /* ignore */ }
     showVoid(event);
+  }
+
+  function stopCamera() {
+    if (!state.cam.required) return;
+    window.ExamCamera.stop();
+    $('camFloat').hidden = true;
+    $('camIndicator').hidden = true;
+    $('faceWarnModal').hidden = true;
+    state.cam.warningOpen = false;
   }
 
   function showVoid(event, serverMessage) {
     state.active = false;
     state.voided = true;
     clearInterval(state.timerId);
+    clearInterval(state.pingId);
+    $('connBanner').hidden = true;
+    stopCamera();
     $('confirmModal').hidden = true;
     busy(false);
     $('voidReason').textContent = event ? REASONS[event] : (serverMessage || 'Exam rules were broken.');
@@ -458,22 +950,45 @@
     $('voidTime').textContent = new Date().toLocaleString();
     $('voidRef').textContent = state.attemptId ? state.attemptId.slice(0, 8).toUpperCase() : '';
     $('questions').textContent = ''; // hide the questions
+    closeZoom();
     $('voidModal').hidden = false;
   }
 
   let blurTimer = null;
   let unfocusedSince = null;
 
+  const reconnectOn = () => state.rules.reconnectSeconds > 0;
+
   function onHidden() {
-    if (state.active && document.visibilityState === 'hidden') {
-      voidExam('TAB_SWITCH', 'Page became hidden (tab switch, minimize, or another window covered it).');
-    }
+    if (!state.active || document.visibilityState !== 'hidden') return;
+    const go = () => voidExam('TAB_SWITCH', 'Page became hidden (tab switch, minimize, or another window covered it).');
+    if (!reconnectOn()) { go(); return; }
+    // A reload or closing the page also hides it; wait a moment to tell them apart.
+    if (!state.hiddenTimer) state.hiddenTimer = setTimeout(() => { state.hiddenTimer = null; go(); }, 500);
+  }
+
+  /** Page is closing or reloading. With reconnect on, this starts the reconnect window instead of voiding. */
+  function onLeaving() {
+    if (!state.active || state.disconnectSent) return;
+    if (!reconnectOn()) { voidExam('PAGE_CLOSED', 'pagehide'); return; }
+    state.unloading = true;
+    state.disconnectSent = true;
+    clearTimeout(state.hiddenTimer);
+    clearTimeout(blurTimer);
+    clearTimeout(state.blurVoidTimer);
+    beacon('disconnect', { attemptId: state.attemptId, detail: 'page closed or reloaded' });
   }
 
   function onBlur() {
     if (!state.active) return;
     const grace = state.rules.blurGraceSeconds * 1000;
-    if (grace <= 0) { voidExam('LEFT_WINDOW', 'Exam window lost focus.'); return; }
+    if (grace <= 0) {
+      if (!reconnectOn()) { voidExam('LEFT_WINDOW', 'Exam window lost focus.'); return; }
+      // Wait a moment so a reload (reconnect allowed) is not counted; coming back quickly still counts.
+      clearTimeout(state.blurVoidTimer);
+      state.blurVoidTimer = setTimeout(() => voidExam('LEFT_WINDOW', 'Exam window lost focus.'), 500);
+      return;
+    }
     clearTimeout(blurTimer);
     blurTimer = setTimeout(() => {
       if (state.active && !document.hasFocus()) voidExam('LEFT_WINDOW', 'Exam window lost focus for more than ' + state.rules.blurGraceSeconds + ' s.');
@@ -483,7 +998,7 @@
   function onFocus() { clearTimeout(blurTimer); unfocusedSince = null; }
 
   function checkMonitorDuringExam() {
-    if (state.active && monitorStatus() === 'multiple') {
+    if (state.active && deviceType() === 'computer' && monitorStatus() === 'multiple') {
       voidExam('SECOND_MONITOR', 'screen.isExtended became true during the exam.');
     }
   }
@@ -494,7 +1009,7 @@
       checkMonitorDuringExam();
       if (!state.active) return;
       if (document.visibilityState === 'hidden') { onHidden(); return; }
-      if (!document.hasFocus()) {
+      if (!document.hasFocus() && !state.unloading) {
         if (unfocusedSince === null) unfocusedSince = Date.now();
         const limit = Math.max(1000, state.rules.blurGraceSeconds * 1000);
         if (Date.now() - unfocusedSince >= limit) voidExam('LEFT_WINDOW', 'Exam window did not have focus.');
@@ -518,8 +1033,14 @@
     document.addEventListener('visibilitychange', onHidden);
     window.addEventListener('blur', onBlur);
     window.addEventListener('focus', onFocus);
-    window.addEventListener('pagehide', () => { if (state.active) voidExam('PAGE_CLOSED', 'pagehide'); });
-    window.addEventListener('beforeunload', (e) => { if (state.active) { e.preventDefault(); e.returnValue = ''; } });
+    window.addEventListener('pagehide', onLeaving);
+    window.addEventListener('beforeunload', (e) => {
+      if (!state.active) return;
+      if (reconnectOn()) { onLeaving(); return; } // reload allowed: reconnect within the time limit
+      e.preventDefault(); e.returnValue = '';
+    });
+    window.addEventListener('offline', () => { if (state.active && reconnectOn()) markOffline(Date.now()); });
+    window.addEventListener('online', () => { if (state.active) ping(); });
     if (window.screen && typeof window.screen.addEventListener === 'function') {
       window.screen.addEventListener('change', () => { checkMonitorDuringExam(); if (!state.attemptId && state.info) refreshStartButton(); });
     }
@@ -530,7 +1051,18 @@
     $('agree').addEventListener('change', refreshStartButton);
     $('submitBtn').addEventListener('click', askSubmit);
     $('confirmNo').addEventListener('click', () => { $('confirmModal').hidden = true; });
-    $('confirmYes').addEventListener('click', () => submitExam(false));
+    $('confirmYes').addEventListener('click', () => {
+      $('confirmModal').hidden = true;
+      const f = confirmAction; confirmAction = null;
+      if (f) f();
+    });
+    $('nextBtn').addEventListener('click', goNext);
+    $('camBtn').addEventListener('click', turnOnCamera);
+    $('faceWarnOk').addEventListener('click', closeFaceWarning);
+    $('camRestartBtn').addEventListener('click', () => { window.ExamCamera.restart().catch(() => {}); });
+    $('prevBtn').addEventListener('click', goPrev);
+    $('imgZoom').addEventListener('click', closeZoom);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('imgZoom').hidden) closeZoom(); });
 
     if (!API_URL || API_URL.indexOf('PASTE_') === 0) {
       showError('This exam page is not set up yet: the instructor needs to put the Apps Script Web App URL in config.js.');

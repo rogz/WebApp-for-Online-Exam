@@ -38,24 +38,45 @@ function create(codePath) {
     insertSheet: n => { const s = new Sheet(n); sheets.push(s); return s; },
     getSheets: () => sheets.slice(),
     deleteSheet: s => sheets.splice(sheets.indexOf(s), 1),
-    getId: () => 'mock-id', getSpreadsheetTimeZone: () => 'Asia/Manila', getActiveSheet: () => sheets[0],
+    getId: () => 'mock-id', getSpreadsheetTimeZone: () => 'Asia/Manila',
+    getActiveSheet: () => active.sheet || sheets[0],
   };
+  // The selected cell (for menu actions that use the current row)
+  const active = { sheet: null, row: 1 };
+  Sheet.prototype.getActiveRange = function () { return { getRow: () => active.row }; };
+  ss.__select = (name, row) => { active.sheet = ss.getSheetByName(name); active.row = row; };
+  // Google Drive
+  const drive = { files: {}, folders: {} };
+  const newId = () => crypto.randomBytes(24).toString('base64').replace(/[^A-Za-z0-9]/g, '').padEnd(33, 'x').slice(0, 33);
+  const blob = (bytes, type, name) => ({ getBytes: () => bytes, getContentType: () => type, getName: () => name });
+  const addFile = (b) => { const id = newId(); drive.files[id] = { getId: () => id, getUrl: () => 'https://drive.google.com/file/d/' + id + '/view?usp=drivesdk', getBlob: () => b, getName: () => b.getName() }; return drive.files[id]; };
+  drive.addFile = addFile;
+  drive.blob = blob;
+  const folder = (name) => { const id = newId(); return (drive.folders[id] = { getId: () => id, getName: () => name, createFile: addFile }); };
   const props = {};
   const ctx = {
     console,
     SpreadsheetApp: { getActiveSpreadsheet: () => ss, openById: () => ss, getUi: () => { throw new Error('no ui'); } },
     PropertiesService: { getScriptProperties: () => ({ setProperty: (k, v) => { props[k] = v; }, getProperty: k => props[k] }) },
     LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
+    DriveApp: {
+      createFolder: folder,
+      getFolderById: id => { if (!drive.folders[id]) throw new Error('no folder'); return drive.folders[id]; },
+      getFileById: id => { if (!drive.files[id]) throw new Error('No item with the given ID could be found'); return drive.files[id]; },
+    },
     Utilities: {
       getUuid: () => crypto.randomUUID(),
       formatDate: (d, tz, f) => new Intl.DateTimeFormat('en-US', { timeZone: tz, dateStyle: 'medium', timeStyle: 'short' }).format(d),
       parseDate: s => new Date(s),
+      base64Decode: s => Array.from(Buffer.from(s, 'base64')),
+      base64Encode: bytes => Buffer.from(bytes).toString('base64'),
+      newBlob: (bytes, type, name) => blob(bytes, type, name),
     },
     ContentService: { createTextOutput: s => ({ content: s, setMimeType() { return this; } }), MimeType: { JSON: 'json' } },
     HtmlService: {},
   };
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(codePath, 'utf8'), ctx, { filename: 'Code.gs' });
-  return { ctx, ss, sheet: n => ss.getSheetByName(n), call: body => JSON.parse(ctx.doPost({ postData: { contents: typeof body === 'string' ? body : JSON.stringify(body) } }).content) };
+  return { ctx, ss, drive, sheet: n => ss.getSheetByName(n), call: body => JSON.parse(ctx.doPost({ postData: { contents: typeof body === 'string' ? body : JSON.stringify(body) } }).content) };
 }
 module.exports = { create };

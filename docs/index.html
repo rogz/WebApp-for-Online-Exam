@@ -10,6 +10,9 @@
   <header class="topbar">
     <div class="brand" id="brand">Online Exam</div>
     <div class="topbar-right" id="examBar" hidden>
+      <!-- Camera preview: bottom-right corner on wide screens, small thumbnail here on narrower ones -->
+      <div class="cam-float" id="camFloat" hidden></div>
+      <span class="cam-indicator" id="camIndicator" hidden>📷 Camera on</span>
       <span class="progress" id="progress">0 / 0 answered</span>
       <span class="timer" id="timer" aria-live="polite">--:--</span>
     </div>
@@ -45,8 +48,10 @@
         <h2>⚠ Read before you start</h2>
         <ul>
           <li><b>Switching tabs or windows will VOID your exam.</b> This includes opening another tab, minimizing the browser, using Alt+Tab / Cmd+Tab, or clicking another application.</li>
-          <li><b>Multiple monitors are prohibited.</b> Disconnect any second monitor, TV or projector <u>before</u> starting. Connecting one during the exam will void it.</li>
-          <li><b>Do not refresh, close, or navigate away from this page.</b> That also voids your exam.</li>
+          <li id="ruleMonitor"><b>Multiple monitors are prohibited.</b> Disconnect any second monitor, TV or projector <u>before</u> starting. Connecting one during the exam will void it.</li>
+          <li id="ruleReload"><b>Do not refresh, close, or navigate away from this page.</b> That also voids your exam.</li>
+          <li id="ruleCamera" hidden></li>
+          <li id="ruleNav" hidden></li>
           <li>The timer starts when you click <i>Start exam</i>. When time runs out, your answers are submitted automatically.</li>
           <li id="rulePaste" hidden>Copy, paste and right-click are disabled during the exam.</li>
           <li>If your exam is voided, inform your instructor. Only your instructor can let you take it again.</li>
@@ -56,9 +61,26 @@
       <div class="checks">
         <h2>System check</h2>
         <ul>
+          <li id="checkDevice"><span class="dot"></span><span class="label">Device</span></li>
           <li id="checkBrowser"><span class="dot"></span><span class="label">Browser</span></li>
           <li id="checkMonitor"><span class="dot"></span><span class="label">Monitors</span></li>
+          <li id="checkCamera" hidden><span class="dot"></span><span class="label">Camera</span></li>
         </ul>
+      </div>
+
+      <div class="camera-panel" id="cameraPanel" hidden>
+        <div class="cam-slot" id="camSlot">
+          <div class="cam-box" id="camBox">
+            <video id="camVideo" muted playsinline></video>
+            <span class="cam-badge" id="camBadge">Camera off</span>
+          </div>
+        </div>
+        <div class="cam-side">
+          <p id="camHelp">This exam requires your camera. Sit facing the screen in a well-lit place, with only you in view.</p>
+          <button type="button" class="btn" id="camBtn">Turn on camera</button>
+          <p class="error" id="camError" hidden></p>
+          <p class="muted small">The camera picture is checked on this computer only. It is not recorded or uploaded.</p>
+        </div>
       </div>
 
       <form id="startForm" autocomplete="off" novalidate>
@@ -67,7 +89,7 @@
           <label>Full name<input id="studentName" required maxlength="120" autocomplete="off"></label>
         </div>
         <label id="accessCodeWrap" hidden>Access code<input id="accessCode" maxlength="64" autocomplete="off"></label>
-        <label class="agree"><input type="checkbox" id="agree"> I have read the rules. I understand that switching tabs or windows, or using a second monitor, will void my exam.</label>
+        <label class="agree"><input type="checkbox" id="agree"> <span id="agreeText">I have read the rules. I understand that switching tabs or windows, or using a second monitor, will void my exam.</span></label>
         <div id="startError" class="error" role="alert" hidden></div>
         <button type="submit" class="btn primary big" id="startBtn" disabled>Start exam</button>
       </form>
@@ -79,9 +101,16 @@
         <h1 id="examTitle2"></h1>
         <p class="muted" id="studentLine"></p>
       </div>
+      <div id="connBanner" class="notice bad conn-banner" role="alert" hidden></div>
       <div id="timeWarning" class="notice warn" hidden></div>
+      <nav class="palette" id="palette" aria-label="Jump to question" hidden></nav>
       <ol id="questions" class="questions"></ol>
-      <div class="card submit-bar">
+      <div class="card pager" id="pager" hidden>
+        <button type="button" class="btn" id="prevBtn">← Previous</button>
+        <span class="pager-mid"><span id="pagerCount" class="muted"></span> <span id="qTimer" class="q-timer" hidden></span></span>
+        <button type="button" class="btn primary" id="nextBtn">Next →</button>
+      </div>
+      <div class="card submit-bar" id="submitBar">
         <span id="progress2" class="muted"></span>
         <button type="button" class="btn primary big" id="submitBtn">Submit exam</button>
       </div>
@@ -104,7 +133,7 @@
       <h2 id="confirmTitle">Submit your exam?</h2>
       <p id="confirmText"></p>
       <div class="modal-actions">
-        <button type="button" class="btn" id="confirmNo">Keep answering</button>
+        <button type="button" class="btn" id="confirmNo">Go back</button>
         <button type="button" class="btn primary" id="confirmYes">Submit now</button>
       </div>
     </div>
@@ -126,12 +155,33 @@
     </div>
   </div>
 
+  <!-- Camera warning -->
+  <div class="modal-backdrop warn" id="faceWarnModal" hidden>
+    <div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="faceWarnTitle">
+      <h2 id="faceWarnTitle">⚠ Warning — this is your only warning</h2>
+      <p class="void-reason" id="faceWarnReason"></p>
+      <p><b>If this happens again, your exam will be voided.</b> Keep your face clearly visible, keep the camera uncovered, make sure no one else is in view, and put any phone away.</p>
+      <div class="cam-box small" id="faceWarnBox"><video id="faceWarnVideo" muted playsinline></video><span class="cam-badge" id="faceWarnBadge"></span></div>
+      <div class="modal-actions">
+        <button type="button" class="btn" id="camRestartBtn" hidden>Turn camera back on</button>
+        <button type="button" class="btn primary" id="faceWarnOk" disabled>I understand — continue</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Enlarged question picture -->
+  <div class="modal-backdrop zoom" id="imgZoom" hidden>
+    <img id="imgZoomImg" alt="Enlarged question picture" draggable="false">
+    <button type="button" class="btn zoom-close" id="imgZoomClose">Close</button>
+  </div>
+
   <!-- Busy -->
   <div class="modal-backdrop" id="busyModal" hidden>
     <div class="modal center"><div class="spinner" aria-hidden="true"></div><p id="busyText">Please wait…</p></div>
   </div>
 
   <script src="config.js"></script>
+  <script src="camera.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

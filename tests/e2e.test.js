@@ -159,7 +159,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await p.close();
   p = await open('LATER');
   await p.waitForSelector('#screen-rules:not([hidden])'); await p.check('#agree');
-  ok(await p.isDisabled('#startBtn') && (await p.textContent('#windowNotice')).includes('not open yet'), 'not-yet-open exam blocked');
+  ok(await p.isDisabled('#startBtn') && (await p.textContent('#windowNotice')).includes('opens in'), 'not-yet-open exam blocked');
   ok(gas.call({ action: 'start', examId: 'LATER', studentId: 'Z', name: 'Z', env: { monitorCheck: 'supported' } }).code === 'NOT_YET_OPEN', 'server enforces window');
   await p.close();
 
@@ -207,6 +207,112 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   old.ctx.setupSheets();
   const after = old.sheet('Roster');
   ok(after.data[0].join() === 'StudentID,Name,Email,AccessCode,Courses' && after.data[1][1] === 'Old Student', 'setup adds Courses column, keeps data');
+
+  // 12. One question at a time, going back allowed
+  ro.data.splice(1); // empty the roster again so anyone can take the next exams
+  const mk2 = (id, displayMode, allowBack) => gas.ctx.builderSaveExam({ id, title: id, questionIds: ['Q001', 'Q003', 'Q005'], start: '', end: '', limitMin: 10, showScore: true, active: true, displayMode, allowBack, shuffleQuestions: false });
+  mk2('ONE-BACK', 'ONE', true);
+  mk2('ONE-NOBACK', 'ONE', false);
+  mk2('SCROLL-NOBACK', 'ALL', false);
+  ok(gas.ctx.builderGetData().exams.find(e => e.id === 'SCROLL-NOBACK').allowBack === true, 'scroll mode always allows back');
+  const visibleIds = pg => pg.$$eval('.question', els => els.filter(e => !e.hidden).map(e => e.dataset.id));
+  p = await open('ONE-BACK');
+  await p.waitForSelector('#screen-rules:not([hidden])');
+  ok((await p.textContent('#ruleNav')).includes('can go back'), 'rules mention one-at-a-time with back');
+  await startAs(p, 'N1', 'Nina One');
+  await p.waitForSelector('#screen-exam:not([hidden])');
+  ok((await visibleIds(p)).join() === 'Q001', 'only first question visible');
+  ok(await p.isVisible('#palette') && (await p.$$('#palette button')).length === 3, 'palette shown');
+  ok(await p.isDisabled('#prevBtn'), 'previous disabled on first');
+  await p.click('.question[data-id="Q001"] .choice:has-text("Mars")');
+  await p.click('#nextBtn');
+  ok((await visibleIds(p)).join() === 'Q003' && (await p.textContent('#pagerCount')) === 'Question 2 of 3', 'next shows question 2');
+  await p.click('#prevBtn');
+  ok((await visibleIds(p)).join() === 'Q001', 'previous goes back');
+  ok(await p.isChecked('.question[data-id="Q001"] input[type=radio]:checked'), 'answer kept after going back');
+  await p.click('#palette button:nth-child(3)');
+  ok((await p.textContent('#nextBtn')) === 'Submit exam', 'last question shows Submit');
+  await p.fill('.question[data-id="Q005"] input.blank', 'Au');
+  await p.screenshot({ path: path.join(require('os').tmpdir(), 'one-at-a-time.png') });
+  await p.click('#nextBtn'); await p.click('#confirmYes');
+  await p.waitForSelector('#screen-result:not([hidden])');
+  ok((await p.textContent('#resultScore')).includes('2 / 3'), 'one-at-a-time submit graded');
+  await p.close();
+
+  // 13. One at a time, no going back
+  p = await open('ONE-NOBACK');
+  await p.waitForSelector('#screen-rules:not([hidden])');
+  ok((await p.textContent('#ruleNav')).includes('cannot go back'), 'rules warn no going back');
+  await startAs(p, 'N2', 'Noel Two');
+  await p.waitForSelector('#screen-exam:not([hidden])');
+  ok(await p.isHidden('#prevBtn') && await p.isHidden('#palette'), 'no previous button or palette');
+  await p.click('.question[data-id="Q001"] .choice:has-text("Venus")'); // wrong answer, gets locked
+  await p.click('#nextBtn');
+  await sleep(300);
+  await p.click('#nextBtn'); // skipping an unanswered question asks first
+  ok(await p.isVisible('#confirmModal') && (await p.textContent('#confirmTitle')).includes('Skip'), 'skip warning shown');
+  await p.click('#confirmNo');
+  ok((await visibleIds(p)).join() === 'Q003', 'stayed on question after Go back');
+  await p.check('.question[data-id="Q003"] input[value="TRUE"]');
+  await p.click('#nextBtn');
+  await sleep(300);
+  const att = attempts().find(x => x.StudentID === 'N2');
+  const prog = gas.sheet('Progress').objects().filter(r => r.AttemptID === att.AttemptID);
+  ok(prog.map(r => r.QuestionID).join() === 'Q001,Q003', 'answers locked on server: ' + prog.map(r => r.QuestionID).join());
+  const res = gas.call({ action: 'start', examId: 'ONE-NOBACK', studentId: 'N2', name: 'Noel Two', env });
+  ok(res.resumed && res.lockedIds.join() === 'Q001,Q003', 'resume returns locked questions');
+  const marsKey = res.questions.find(q => q.id === 'Q001').choices.find(c => c.text === 'Mars').key;
+  const tam = gas.call({ action: 'submit', attemptId: att.AttemptID, answers: { Q001: marsKey, Q003: 'TRUE', Q005: 'Au' } });
+  ok(tam.score === 2, 'locked wrong answer stays wrong: score ' + tam.score);
+  ok(gas.call({ action: 'lockAnswer', attemptId: att.AttemptID, questionId: 'Q005', value: 'x' }).code === 'ALREADY_SUBMITTED', 'no locking after submit');
+  await p.close();
+
+  // 14. Random set of questions per student (e.g. 10 from a pool of 30)
+  const Q = gas.sheet('Questions'); const qh = Q.data[0];
+  const pool = [];
+  for (let i = 101; i <= 130; i++) {
+    const id = 'P' + i; pool.push(id);
+    Q.appendRow(qh.map(h => ({ QuestionID: id, Type: 'MC', Question: 'Pool question ' + i, Choices: 'right | wrong | also wrong', Answer: 'A', Points: 1, Topic: 'POOL' }[h] ?? '')));
+  }
+  let err = null;
+  try { gas.ctx.builderSaveExam({ id: 'POOL-BAD', title: 'x', questionIds: pool.slice(0, 5), start: '', end: '', limitMin: 10, pickCount: 6 }); } catch (e) { err = e.message; }
+  ok(/more than the 5 questions/.test(err || ''), 'cannot ask for more questions than selected: ' + err);
+  gas.ctx.builderSaveExam({ id: 'POOL', title: 'Pool quiz', questionIds: pool, start: '', end: '', limitMin: 10, showScore: true, active: true, pickCount: 10, shuffleQuestions: false });
+  ok(gas.ctx.builderGetData().exams.find(e => e.id === 'POOL').pickCount === 10, 'pick count saved');
+  const info = gas.call({ action: 'getExam', examId: 'POOL' });
+  ok(info.exam.questionCount === 10 && info.exam.poolSize === 30 && info.exam.totalPoints === 10, 'exam info: 10 from 30, 10 points');
+  const sets = [];
+  for (let i = 1; i <= 6; i++) {
+    const st = gas.call({ action: 'start', examId: 'POOL', studentId: 'PS' + i, name: 'Pool ' + i, env });
+    const ids = st.questions.map(q => q.id);
+    ok(ids.length === 10 && ids.every(id => pool.includes(id)) && new Set(ids).size === 10, `student ${i} gets 10 different pool questions`);
+    sets.push({ st, ids });
+  }
+  ok(new Set(sets.map(x => x.ids.slice().sort().join())).size >= 5, 'students get different sets: ' + new Set(sets.map(x => x.ids.slice().sort().join())).size + ' distinct of 6');
+  ok(sets[0].ids.join() === pool.filter(id => sets[0].ids.includes(id)).join(), 'without shuffle, picked questions keep the bank order');
+  const again = gas.call({ action: 'start', examId: 'POOL', studentId: 'PS1', name: 'Pool 1', env });
+  ok(again.resumed && again.questions.map(q => q.id).join() === sets[0].ids.join(), 'same set after reconnecting');
+  const answers = {}; sets[0].st.questions.forEach(q => { answers[q.id] = q.choices.find(c => c.text === 'right').key; });
+  const graded = gas.call({ action: 'submit', attemptId: sets[0].st.attemptId, answers });
+  ok(graded.score === 10 && graded.maxScore === 10, 'graded on own 10 questions: ' + graded.score + '/' + graded.maxScore);
+  ok(gas.sheet('Responses').objects().filter(r => r.AttemptID === sets[0].st.attemptId).length === 10, '10 response rows, not 30');
+  // forward-only mode only accepts the student's own questions
+  gas.ctx.builderSaveExam({ id: 'POOL-ONE', title: 'Pool one', questionIds: pool, start: '', end: '', limitMin: 10, showScore: true, active: true, pickCount: 5, displayMode: 'ONE', allowBack: false });
+  const one = gas.call({ action: 'start', examId: 'POOL-ONE', studentId: 'PS9', name: 'x', env });
+  const notMine = pool.find(id => !one.questions.some(q => q.id === id));
+  ok(gas.call({ action: 'lockAnswer', attemptId: one.attemptId, questionId: notMine, value: '0' }).code === 'BAD_INPUT', 'cannot lock a question outside own set');
+  ok(gas.call({ action: 'lockAnswer', attemptId: one.attemptId, questionId: one.questions[0].id, value: '0' }).ok, 'can lock own question');
+  // Student page
+  p = await open('POOL');
+  await p.waitForSelector('#screen-rules:not([hidden])');
+  ok((await p.textContent('#factQuestions')) === '10 (picked at random from 30)', 'rules: ' + await p.textContent('#factQuestions'));
+  await startAs(p, 'PS20', 'Pool Page');
+  await p.waitForSelector('#screen-exam:not([hidden])');
+  ok((await p.$$('.question')).length === 10 && (await p.textContent('#progress')) === '0 / 10 answered', 'page shows 10 questions');
+  await p.close();
+  // Different points in the pool → total shown as "depends"
+  Q.set(Q.data.findIndex(r => r[qh.indexOf('QuestionID')] === 'P101') + 1, qh.indexOf('Points') + 1, 5);
+  ok(gas.call({ action: 'getExam', examId: 'POOL' }).exam.totalPoints === null, 'total points "depends" when pool points differ');
 
   ok(errors.length === 0, 'no page errors ' + errors.join(' | '));
   await browser.close(); server.close();

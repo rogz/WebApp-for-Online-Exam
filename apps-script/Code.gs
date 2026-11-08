@@ -26,30 +26,48 @@ const SHEET = {
   ATTEMPTS: 'Attempts',
   RESPONSES: 'Responses',
   VIOLATIONS: 'Violations',
+  PROGRESS: 'Progress',
   SETTINGS: 'Settings',
 };
 
 const HEADERS = {
-  Questions: ['QuestionID', 'Type', 'Question', 'Choices', 'Answer', 'Points', 'Topic'],
+  Questions: ['QuestionID', 'Type', 'Question', 'Choices', 'Answer', 'Points', 'Topic', 'Image'],
   Exams: ['ExamID', 'Title', 'Instructions', 'QuestionIDs', 'StartDateTime', 'EndDateTime',
-    'TimeLimitMinutes', 'ShuffleQuestions', 'ShuffleChoices', 'ShowScore', 'Active', 'Course'],
+    'TimeLimitMinutes', 'ShuffleQuestions', 'ShuffleChoices', 'ShowScore', 'Active', 'Course',
+    'DisplayMode', 'AllowBack', 'FaceMonitor', 'CameraPreview', 'QuestionTimeSeconds', 'QuestionsPerStudent', 'TopicCounts', 'AllowedDevices'],
   Roster: ['StudentID', 'Name', 'Email', 'AccessCode', 'Courses'],
   Attempts: ['AttemptID', 'ExamID', 'StudentID', 'Name', 'Status', 'StartedAt', 'Deadline',
     'SubmittedAt', 'Score', 'MaxScore', 'Percent', 'PendingEssays', 'Late', 'VoidReason',
-    'VoidedAt', 'AllowRetake', 'IsRetake', 'UserAgent', 'Course'],
+    'VoidedAt', 'AllowRetake', 'IsRetake', 'UserAgent', 'Course', 'Warnings', 'LastSeen', 'DisconnectedAt', 'Reconnects', 'Device'],
   Responses: ['AttemptID', 'ExamID', 'StudentID', 'QuestionID', 'Type', 'Question',
     'StudentAnswer', 'CorrectAnswer', 'IsCorrect', 'PointsEarned', 'MaxPoints'],
   Violations: ['Timestamp', 'AttemptID', 'ExamID', 'StudentID', 'Name', 'Event', 'Detail'],
+  Progress: ['Timestamp', 'AttemptID', 'QuestionID', 'Answer'],
   Settings: ['Key', 'Value', 'Description'],
 };
 
 const DEFAULT_SETTINGS = [
   ['STUDENT_APP_URL', '', 'Address of the student exam page (your GitHub Pages URL). Used to build exam links.'],
   ['BLUR_GRACE_SECONDS', 0, 'Seconds the exam window may lose focus (Alt+Tab, clicking another app) before the exam is voided. 0 = immediately.'],
-  ['REQUIRE_MONITOR_CHECK', true, 'TRUE = only browsers that can detect extra monitors (Chrome / Edge on a computer) may take exams.'],
+  ['REQUIRE_MONITOR_CHECK', true, 'Computers only: TRUE = the browser must be able to detect extra monitors (Chrome / Edge). Tablets and phones skip the monitor check. Which devices may take an exam is set per exam in the Exam Builder.'],
   ['BLOCK_COPY_PASTE', true, 'TRUE = disable copy, paste and right-click on the exam page.'],
   ['SUBMIT_GRACE_SECONDS', 60, 'Extra seconds after the deadline during which a submission is still on time (network delays).'],
+  ['FACE_GRACE_SECONDS', 3, 'Camera-monitored exams: seconds a problem (face hidden, camera covered, extra person, phone) must last before it counts. 1st time = warning, 2nd time = voided.'],
+  ['PHONE_DETECTION', true, 'Camera-monitored exams: TRUE = also watch for a mobile phone held in front of the camera.'],
+  ['OPEN_COUNTDOWN', true, 'TRUE = before an exam opens, show students a countdown ("Opens in 1:05:30"). FALSE = only show the opening date.'],
+  ['TIME_WARNINGS', '5, 1', 'Minutes before time runs out when students get a "time left" warning, separated by commas (e.g. 10, 5, 1). Leave empty for no warnings.'],
+  ['RECONNECT_SECONDS', 60, 'If a student\'s internet drops or the page reloads, how many seconds they have to reconnect and continue. 0 = off (leaving or reloading the page voids the exam).'],
+  ['MAX_RECONNECTS', 3, 'How many times a student may reopen the exam page after a disconnection. More than this voids the exam.'],
 ];
+
+/** Camera events give one warning first; the next one voids the exam. */
+const WARNABLE_EVENTS = ['NO_FACE', 'CAMERA_BLOCKED', 'MULTIPLE_FACES', 'PHONE_DETECTED', 'CAMERA_OFF'];
+
+/** The page pings every 20 s; allow this much extra on the server before counting a gap. */
+const PING_SLACK_MS = 30000;
+
+/** Largest image a question may have (uploads are compressed below this). */
+const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 
 const STATUS = {
   IN_PROGRESS: 'IN_PROGRESS',
@@ -63,6 +81,13 @@ const VIOLATION_LABELS = {
   LEFT_WINDOW: 'Left the exam window (for example Alt+Tab to another application)',
   SECOND_MONITOR: 'A second monitor was connected during the exam',
   PAGE_CLOSED: 'Closed or reloaded the exam page',
+  NO_FACE: 'Face was not visible to the camera',
+  CAMERA_BLOCKED: 'The camera was covered or blocked',
+  MULTIPLE_FACES: 'More than one person was in front of the camera',
+  PHONE_DETECTED: 'A mobile phone was seen on camera',
+  CAMERA_OFF: 'The camera was turned off or disconnected',
+  CONNECTION_LOST: 'Was disconnected for longer than allowed',
+  TOO_MANY_RECONNECTS: 'Reconnected more times than allowed',
 };
 
 // ───────────────────────────── Web App API ─────────────────────────────
@@ -91,6 +116,7 @@ const API_ = {
     const exam = examConfig_(getExamRow_(req.examId));
     const bank = getQuestionBank_();
     const questions = examQuestions_(exam, bank);
+    const summary = setSummary_(exam, questions);
     const settings = getSettings_();
     const roster = readTable_(SHEET.ROSTER).rows.filter(r => String(r.StudentID).trim() !== '');
     const tz = tz_();
@@ -100,10 +126,18 @@ const API_ = {
         id: exam.id,
         title: exam.title,
         course: exam.course,
+        displayMode: exam.displayMode,
+        faceMode: exam.faceMode,
+        allowedDevices: exam.allowedDevices,
+        cameraPreview: exam.cameraPreview,
+        questionSeconds: exam.questionSeconds,
+        allowBack: exam.allowBack,
         instructions: exam.instructions,
-        questionCount: questions.length,
-        totalPoints: sum_(questions.map(q => q.points)),
-        typeCounts: countBy_(questions, q => q.type),
+        questionCount: summary.count,
+        poolSize: summary.poolSize,
+        totalPoints: summary.totalPoints,
+        typeCounts: summary.typeCounts,
+        topicBreakdown: summary.topicBreakdown,
         timeLimitMinutes: exam.limitMin,
         startMs: exam.start ? exam.start.getTime() : null,
         endMs: exam.end ? exam.end.getTime() : null,
@@ -117,6 +151,12 @@ const API_ = {
         blurGraceSeconds: settings.BLUR_GRACE_SECONDS,
         requireMonitorCheck: settings.REQUIRE_MONITOR_CHECK,
         blockCopyPaste: settings.BLOCK_COPY_PASTE,
+        faceGraceSeconds: settings.FACE_GRACE_SECONDS,
+        phoneDetection: settings.PHONE_DETECTION,
+        openCountdown: settings.OPEN_COUNTDOWN,
+        timeWarnings: settings.TIME_WARNINGS,
+        reconnectSeconds: settings.RECONNECT_SECONDS,
+        maxReconnects: settings.MAX_RECONNECTS,
       },
       rosterEnabled: roster.length > 0,
       requiresAccessCode: roster.some(r => String(r.AccessCode).trim() !== ''),
@@ -170,6 +210,7 @@ const API_ = {
         if (last.Status === STATUS.IN_PROGRESS) {
           const dl = toDate_(last.Deadline);
           if (!dl || now <= dl) {
+            checkReconnect_(attempts, last, settings, now); // throws if too late / too many times
             attempt = last; // resume (e.g. browser crashed or lost connection)
             resumed = true;
           } else {
@@ -191,18 +232,31 @@ const API_ = {
         if (status === 'CLOSED' && !isRetake) {
           throw apiError_('CLOSED', 'This exam closed on ' + fmtDate_(exam.end, tz_()) + '.');
         }
-        if (env.isExtended === true) {
-          throw apiError_('SECOND_MONITOR', 'A second monitor is connected. Disconnect it before starting the exam.');
+        const device = deviceOf_(env);
+        if (!deviceAllowed_(exam.allowedDevices, device)) {
+          throw apiError_('DEVICE_NOT_ALLOWED', exam.allowedDevices === 'TABLET'
+            ? 'This exam must be taken on a computer or a tablet, not a phone.'
+            : 'This exam must be taken on a laptop or desktop computer.');
         }
-        if (settings.REQUIRE_MONITOR_CHECK && env.monitorCheck !== 'supported') {
-          throw apiError_('UNSUPPORTED_BROWSER', 'Please open the exam in Google Chrome or Microsoft Edge on a laptop or desktop computer.');
+        // The second-monitor check applies to computers; tablets and phones skip it.
+        if (device === 'computer') {
+          if (env.isExtended === true) {
+            throw apiError_('SECOND_MONITOR', 'A second monitor is connected. Disconnect it before starting the exam.');
+          }
+          if (settings.REQUIRE_MONITOR_CHECK && env.monitorCheck !== 'supported') {
+            throw apiError_('UNSUPPORTED_BROWSER', 'Please open the exam in Google Chrome or Microsoft Edge on a laptop or desktop computer.');
+          }
+        }
+        if (exam.faceMode !== 'OFF' && env.camera !== 'ok') {
+          throw apiError_('CAMERA_REQUIRED', 'This exam requires your camera. Turn it on and make sure your face is visible.');
         }
 
         let deadline = exam.limitMin > 0 ? new Date(now.getTime() + exam.limitMin * 60000) : null;
         if (!isRetake && exam.end && (!deadline || exam.end < deadline)) deadline = exam.end;
 
+        const newId = Utilities.getUuid();
         attempt = {
-          AttemptID: Utilities.getUuid(),
+          AttemptID: newId,
           ExamID: exam.id,
           StudentID: asText_(studentId),
           Name: asText_(name),
@@ -211,7 +265,7 @@ const API_ = {
           Deadline: deadline || '',
           SubmittedAt: '',
           Score: '',
-          MaxScore: sum_(questions.map(q => q.points)),
+          MaxScore: sum_(attemptQuestions_(exam, questions, newId).map(q => q.points)),
           Percent: '',
           PendingEssays: '',
           Late: '',
@@ -219,23 +273,28 @@ const API_ = {
           VoidedAt: '',
           AllowRetake: false,
           IsRetake: isRetake,
+          LastSeen: now,
+          Reconnects: 0,
           UserAgent: asText_(String(env.userAgent || '').slice(0, 300)),
           Course: asText_(exam.course),
+          Device: device,
         };
         appendObj_(attempts, attempt, ['AllowRetake']);
       }
 
       const deadline = toDate_(attempt.Deadline);
-      const ordered = exam.shuffleQuestions ? seededShuffle_(questions, attempt.AttemptID) : questions;
+      const ordered = attemptQuestions_(exam, questions, attempt.AttemptID);
       return {
         attemptId: attempt.AttemptID,
         studentId: studentId,
         studentName: name,
         resumed: resumed,
+        reconnects: Number(attempt.Reconnects) || 0,
         isRetake: toBool_(attempt.IsRetake, false),
         deadlineMs: deadline ? deadline.getTime() : null,
         remainingMs: deadline ? Math.max(0, deadline.getTime() - now.getTime()) : null,
         questions: ordered.map(q => publicQuestion_(q, exam, attempt.AttemptID)),
+        lockedIds: resumed && !exam.allowBack ? Object.keys(lockedAnswers_(attempt.AttemptID)) : [],
       };
     });
   },
@@ -246,10 +305,82 @@ const API_ = {
       const attempts = readTable_(SHEET.ATTEMPTS);
       const a = findAttempt_(attempts, req.attemptId);
       const event = VIOLATION_LABELS[req.event] ? req.event : 'TAB_SWITCH';
-      logViolation_(a, event, req.detail);
-      if (a.Status === STATUS.IN_PROGRESS) voidAttempt_(attempts, a, event);
+      if (a.Status !== STATUS.IN_PROGRESS) {
+        logViolation_(a, event, req.detail);
+        return { status: a.Status, reason: a.VoidReason };
+      }
+      if (WARNABLE_EVENTS.indexOf(event) !== -1 && !(Number(a.Warnings) > 0)) {
+        logViolation_(a, event, 'WARNING (1st offense): ' + String(req.detail || ''));
+        updateFields_(attempts, a, { Warnings: 1 });
+        return { status: a.Status, warned: true };
+      }
+      logViolation_(a, event, (WARNABLE_EVENTS.indexOf(event) !== -1 ? 'VOIDED (2nd offense): ' : 'VOIDED: ') + String(req.detail || ''));
+      voidAttempt_(attempts, a, event);
       return { status: a.Status, reason: a.VoidReason };
     });
+  },
+
+  /** One-question-at-a-time without going back: saves and locks an answer when the student moves on. */
+  lockAnswer(req) {
+    return withLock_(() => {
+      const attempts = readTable_(SHEET.ATTEMPTS);
+      const a = findAttempt_(attempts, req.attemptId);
+      if (a.Status !== STATUS.IN_PROGRESS) throw blockedError_(a);
+      const exam = examConfig_(getExamRow_(a.ExamID, true));
+      if (exam.allowBack) return { locked: false };
+      const qid = String(req.questionId || '');
+      const mine = attemptQuestions_(exam, examQuestions_(exam, getQuestionBank_()), a.AttemptID).map(q => q.id);
+      if (mine.indexOf(qid) === -1) throw apiError_('BAD_INPUT', 'Unknown question.');
+      const locked = lockedAnswers_(a.AttemptID);
+      if (!(qid in locked)) {
+        const v = req.value === undefined || req.value === null ? '' : String(req.value).slice(0, 20000);
+        appendObj_(readTable_(SHEET.PROGRESS), { Timestamp: new Date(), AttemptID: a.AttemptID, QuestionID: asText_(qid), Answer: asText_(v) });
+      }
+      return { locked: true };
+    });
+  },
+
+  /** Heartbeat while the exam page is open (every 20 s). Voids if the page was gone too long. */
+  ping(req) {
+    return withLock_(() => {
+      const attempts = readTable_(SHEET.ATTEMPTS);
+      const a = findAttempt_(attempts, req.attemptId);
+      if (a.Status !== STATUS.IN_PROGRESS) return { status: a.Status, reason: a.VoidReason };
+      if (!enforceConnectionGap_(attempts, a, getSettings_(), new Date())) return { status: a.Status, reason: a.VoidReason };
+      updateFields_(attempts, a, { LastSeen: new Date(), DisconnectedAt: '' });
+      return { status: a.Status };
+    });
+  },
+
+  /** The page is closing or reloading (sent with navigator.sendBeacon). Starts the reconnect window. */
+  disconnect(req) {
+    return withLock_(() => {
+      const attempts = readTable_(SHEET.ATTEMPTS);
+      const a = findAttempt_(attempts, req.attemptId);
+      if (a.Status !== STATUS.IN_PROGRESS) return { status: a.Status };
+      const settings = getSettings_();
+      if (!(settings.RECONNECT_SECONDS > 0)) {
+        logViolation_(a, 'PAGE_CLOSED', 'VOIDED: ' + String(req.detail || 'page closed'));
+        voidAttempt_(attempts, a, 'PAGE_CLOSED');
+        return { status: a.Status };
+      }
+      logViolation_(a, 'DISCONNECTED', 'Page closed or reloaded. Has ' + settings.RECONNECT_SECONDS + ' s to reconnect. ' + String(req.detail || ''));
+      updateFields_(attempts, a, { DisconnectedAt: new Date() });
+      return { status: a.Status };
+    });
+  },
+
+  /** The picture of one of the student's own questions (Drive images only), as a data URL. */
+  image(req) {
+    const attempts = readTable_(SHEET.ATTEMPTS);
+    const a = findAttempt_(attempts, req.attemptId);
+    if (a.Status !== STATUS.IN_PROGRESS) throw blockedError_(a);
+    const exam = examConfig_(getExamRow_(a.ExamID, true));
+    const mine = attemptQuestions_(exam, examQuestions_(exam, getQuestionBank_()), a.AttemptID);
+    const q = mine.find(x => x.id === String(req.questionId || ''));
+    const fileId = q && driveFileId_(q.image);
+    if (!fileId) throw apiError_('BAD_INPUT', 'This question has no picture.');
+    return { dataUrl: driveImageDataUrl_(fileId) };
   },
 
   /** Grades and records the submission. */
@@ -274,12 +405,14 @@ const API_ = {
 
       const settings = getSettings_();
       const now = new Date();
+      if (!enforceConnectionGap_(attempts, a, settings, now)) throw blockedError_(a);
       const deadline = toDate_(a.Deadline);
       const late = !!deadline && now.getTime() > deadline.getTime() + settings.SUBMIT_GRACE_SECONDS * 1000;
 
       const bank = getQuestionBank_();
-      const questions = examQuestions_(exam, bank);
-      const answers = (req.answers && typeof req.answers === 'object') ? req.answers : {};
+      const questions = attemptQuestions_(exam, examQuestions_(exam, bank), a.AttemptID);
+      const answers = Object.assign({}, (req.answers && typeof req.answers === 'object') ? req.answers : {});
+      if (!exam.allowBack) Object.assign(answers, lockedAnswers_(a.AttemptID)); // locked answers can't be changed
 
       let score = 0, max = 0, pending = 0;
       const rows = questions.map(q => {
@@ -398,8 +531,22 @@ function getExamRow_(examId, allowInactive) {
   return row;
 }
 
+/**
+ * Exams → FaceMonitor:
+ *   OFF    – no camera needed
+ *   START  – face must be visible before starting; camera turns off when the exam begins
+ *   ALWAYS – face checked before starting AND monitored during the exam (1 warning, then void)
+ * TRUE (older sheets) means ALWAYS; FALSE / empty means OFF.
+ */
+function parseFaceMode_(v) {
+  if (v === true) return 'ALWAYS';
+  const s = String(v === undefined || v === null ? '' : v).trim().toUpperCase();
+  if (s === 'START' || s === 'ALWAYS') return s;
+  return toBool_(s, false) ? 'ALWAYS' : 'OFF';
+}
+
 function examConfig_(row) {
-  return {
+  const cfg = {
     id: String(row.ExamID).trim(),
     title: String(row.Title || row.ExamID),
     instructions: String(row.Instructions || ''),
@@ -411,7 +558,20 @@ function examConfig_(row) {
     shuffleChoices: toBool_(row.ShuffleChoices, false),
     showScore: toBool_(row.ShowScore, true),
     course: String(row.Course || '').trim(),
+    displayMode: String(row.DisplayMode || '').trim().toUpperCase() === 'ONE' ? 'ONE' : 'ALL',
+    faceMode: parseFaceMode_(row.FaceMonitor),
+    cameraPreview: toBool_(row.CameraPreview, true),
+    questionSeconds: Math.max(0, Math.round(Number(row.QuestionTimeSeconds) || 0)),
+    pickCount: Math.max(0, Math.round(Number(row.QuestionsPerStudent) || 0)),
+    topicCounts: parseTopicCounts_(row.TopicCounts),
+    allowedDevices: parseAllowedDevices_(row.AllowedDevices),
   };
+  // "No going back" only makes sense when questions are shown one at a time
+  cfg.allowBack = cfg.displayMode === 'ONE' ? toBool_(row.AllowBack, true) : true;
+  // A time limit per question only works one question at a time, and without going back
+  if (cfg.displayMode !== 'ONE') cfg.questionSeconds = 0;
+  if (cfg.questionSeconds > 0) cfg.allowBack = false;
+  return cfg;
 }
 
 function getQuestionBank_() {
@@ -429,10 +589,97 @@ function getQuestionBank_() {
       answer: r.Answer,
       points: Number(r.Points) > 0 ? Number(r.Points) : 1,
       topic: String(r.Topic || '').trim(),
+      image: String(r.Image || '').trim(),
       row: r._row,
     };
   });
   return map;
+}
+
+/**
+ * The questions one attempt gets. With "Questions per student" set (e.g. 10 of 50),
+ * each student gets their own random set; it is the same set every time for that
+ * attempt (reconnects, grading). Order is shuffled too if "Shuffle questions" is on.
+ */
+function attemptQuestions_(exam, pool, attemptId) {
+  let qs = pool;
+  if (exam.topicCounts.length) {
+    // "Pick X from each topic": a separate random draw inside each listed topic
+    const picked = {};
+    exam.topicCounts.forEach(tc => {
+      const inTopic = pool.filter(q => normTopic_(q.topic) === normTopic_(tc.topic));
+      seededShuffle_(inTopic, attemptId + ':pick:' + normTopic_(tc.topic)).slice(0, tc.count).forEach(q => { picked[q.id] = true; });
+    });
+    qs = pool.filter(q => picked[q.id]);
+  } else if (exam.pickCount > 0 && exam.pickCount < pool.length) {
+    const picked = {};
+    seededShuffle_(pool, attemptId + ':pick').slice(0, exam.pickCount).forEach(q => { picked[q.id] = true; });
+    qs = pool.filter(q => picked[q.id]);
+  }
+  return exam.shuffleQuestions ? seededShuffle_(qs, String(attemptId)) : qs;
+}
+
+/**
+ * Exams → AllowedDevices:
+ *   COMPUTER – laptops and desktops only (empty = this, as before)
+ *   TABLET   – computers and tablets
+ *   ANY      – computers, tablets and phones
+ */
+function parseAllowedDevices_(v) {
+  const s = String(v || '').trim().toUpperCase();
+  return s === 'TABLET' || s === 'ANY' ? s : 'COMPUTER';
+}
+
+function deviceAllowed_(allowed, device) {
+  if (allowed === 'ANY') return true;
+  if (allowed === 'TABLET') return device === 'computer' || device === 'tablet';
+  return device === 'computer';
+}
+
+/** The device the page reported, double-checked against the browser's user agent. */
+function deviceOf_(env) {
+  const ua = String(env.userAgent || '');
+  if (/iPhone|iPod|Windows Phone/i.test(ua) || (/Android/i.test(ua) && /Mobile/i.test(ua))) return 'phone';
+  const d = String(env.device || '');
+  if (d === 'phone' || d === 'tablet') return d;
+  if (/iPad|Tablet/i.test(ua) || /Android/i.test(ua)) return 'tablet';
+  return 'computer';
+}
+
+/** "Easy: 5 | Hard: 3" → [{ topic: 'Easy', count: 5 }, { topic: 'Hard', count: 3 }] */
+function parseTopicCounts_(v) {
+  return String(v || '').split('|').map(part => {
+    const i = part.lastIndexOf(':');
+    if (i === -1) return null;
+    const topic = part.slice(0, i).trim();
+    const count = Math.round(Number(part.slice(i + 1)));
+    return topic && count > 0 ? { topic: topic, count: count } : null;
+  }).filter(Boolean);
+}
+
+function normTopic_(t) { return String(t || '').trim().toLowerCase().replace(/\s+/g, ' '); }
+
+/** What students are told about the question set (count, pool, points). */
+function setSummary_(exam, pool) {
+  const samePoints = qs => qs.length > 0 && qs.every(q => q.points === qs[0].points);
+  if (exam.topicCounts.length) {
+    let count = 0, points = 0, fixed = true;
+    const breakdown = exam.topicCounts.map(tc => {
+      const inTopic = pool.filter(q => normTopic_(q.topic) === normTopic_(tc.topic));
+      const n = Math.min(tc.count, inTopic.length);
+      count += n;
+      if (n === inTopic.length) points += sum_(inTopic.map(q => q.points));
+      else if (samePoints(inTopic)) points += n * inTopic[0].points;
+      else fixed = false;
+      return { topic: tc.topic, count: n, available: inTopic.length };
+    });
+    return { count: count, poolSize: pool.length, totalPoints: fixed ? points : null, typeCounts: null, topicBreakdown: breakdown };
+  }
+  if (exam.pickCount > 0 && exam.pickCount < pool.length) {
+    // With a random set per student, points/types can differ between students
+    return { count: exam.pickCount, poolSize: pool.length, totalPoints: samePoints(pool) ? exam.pickCount * pool[0].points : null, typeCounts: null, topicBreakdown: null };
+  }
+  return { count: pool.length, poolSize: null, totalPoints: sum_(pool.map(q => q.points)), typeCounts: countBy_(pool, q => q.type), topicBreakdown: null };
 }
 
 function examQuestions_(exam, bank) {
@@ -456,6 +703,9 @@ function validateQuestion_(q) {
   }
   if (q.type === 'TF' && parseTF_(q.answer) === null) p.push('Answer must be TRUE or FALSE');
   if (q.type === 'FIB' && !String(q.answer).trim()) p.push('Answer is empty (separate accepted answers with |)');
+  if (q.image && !driveFileId_(q.image) && !externalImageUrl_(q.image)) {
+    p.push('Image must be a Google Drive link or a link starting with https:// (use Exam Admin → Add image to question)');
+  }
   return p;
 }
 
@@ -466,7 +716,34 @@ function publicQuestion_(q, exam, attemptId) {
     if (exam.shuffleChoices) choices = seededShuffle_(choices, attemptId + ':' + q.id);
     out.choices = choices;
   }
+  if (q.image) {
+    // Drive images are sent through this script (no public sharing needed); other links load directly.
+    if (driveFileId_(q.image)) out.image = { drive: true };
+    else if (externalImageUrl_(q.image)) out.image = { src: externalImageUrl_(q.image) };
+  }
   return out;
+}
+
+/** Google Drive file ID from a share link (or a bare ID), else null. */
+function driveFileId_(v) {
+  const s = String(v || '').trim();
+  const m = s.match(/drive\.google\.com\/(?:file\/d\/|open\?(?:[^#]*&)?id=|uc\?(?:[^#]*&)?id=|thumbnail\?(?:[^#]*&)?id=)([\w-]{20,})/) ||
+    s.match(/docs\.google\.com\/[^/]+\/d\/([\w-]{20,})/) ||
+    s.match(/googleusercontent\.com\/d\/([\w-]{20,})/);
+  if (m) return m[1];
+  return /^[\w-]{25,}$/.test(s) ? s : null;
+}
+
+/** A link students' browsers can load directly. Dropbox share links are turned into direct links. */
+function externalImageUrl_(v) {
+  const s = String(v || '').trim();
+  if (!/^https?:\/\/[^\s]+$/i.test(s) || driveFileId_(s)) return null;
+  if (/^https?:\/\/([\w-]+\.)*dropbox\.com\//i.test(s)) {
+    let u = s.replace(/([?&])dl=[01]/, '$1raw=1');
+    if (!/[?&]raw=1/.test(u)) u += (u.indexOf('?') === -1 ? '?' : '&') + 'raw=1';
+    return u;
+  }
+  return s;
 }
 
 function normType_(t) {
@@ -485,6 +762,54 @@ function windowStatus_(exam, now) {
 }
 
 // ───────────────────────────── Attempts ─────────────────────────────
+
+/** Answers locked for an attempt: { questionId: answer } (first save wins). */
+function lockedAnswers_(attemptId) {
+  const out = {};
+  readTable_(SHEET.PROGRESS).rows.forEach(r => {
+    const q = String(r.QuestionID);
+    if (String(r.AttemptID) === String(attemptId) && !(q in out)) out[q] = r.Answer === null ? '' : String(r.Answer);
+  });
+  return out;
+}
+
+/**
+ * Reconnect rules when a student reopens an exam that is still in progress.
+ * Allowed only within RECONNECT_SECONDS of losing contact, and at most MAX_RECONNECTS times.
+ * With RECONNECT_SECONDS = 0 the old behaviour applies (resume only after a crash).
+ */
+function checkReconnect_(attempts, a, settings, now) {
+  if (!(settings.RECONNECT_SECONDS > 0)) return;
+  const disc = toDate_(a.DisconnectedAt);
+  const ref = disc || toDate_(a.LastSeen) || toDate_(a.StartedAt);
+  const gapMs = ref ? now.getTime() - ref.getTime() : 0;
+  const allowedMs = settings.RECONNECT_SECONDS * 1000 + (disc ? 0 : PING_SLACK_MS);
+  const used = Number(a.Reconnects) || 0;
+  if (gapMs > allowedMs) {
+    logViolation_(a, 'CONNECTION_LOST', 'VOIDED: came back after ' + Math.round(gapMs / 1000) + ' s (limit ' + settings.RECONNECT_SECONDS + ' s)');
+    voidAttempt_(attempts, a, 'CONNECTION_LOST');
+    throw blockedError_(a);
+  }
+  if (used >= settings.MAX_RECONNECTS) {
+    logViolation_(a, 'TOO_MANY_RECONNECTS', 'VOIDED: tried to reconnect ' + (used + 1) + ' times (limit ' + settings.MAX_RECONNECTS + ')');
+    voidAttempt_(attempts, a, 'TOO_MANY_RECONNECTS');
+    throw blockedError_(a);
+  }
+  logViolation_(a, 'RECONNECTED', 'Reconnect ' + (used + 1) + ' of ' + settings.MAX_RECONNECTS + ' after ' + Math.round(gapMs / 1000) + ' s');
+  updateFields_(attempts, a, { Reconnects: used + 1, DisconnectedAt: '', LastSeen: now });
+}
+
+/** Voids the attempt if the page has been out of contact longer than allowed. Returns false if voided. */
+function enforceConnectionGap_(attempts, a, settings, now) {
+  if (!(settings.RECONNECT_SECONDS > 0)) return true;
+  const ref = toDate_(a.LastSeen);
+  if (!ref) return true; // started before this feature existed
+  const gapMs = now.getTime() - ref.getTime();
+  if (gapMs <= settings.RECONNECT_SECONDS * 1000 + PING_SLACK_MS) return true;
+  logViolation_(a, 'CONNECTION_LOST', 'VOIDED: no contact for ' + Math.round(gapMs / 1000) + ' s (limit ' + settings.RECONNECT_SECONDS + ' s)');
+  voidAttempt_(attempts, a, 'CONNECTION_LOST');
+  return false;
+}
 
 function findAttempt_(table, attemptId) {
   const id = String(attemptId || '').trim();
@@ -533,6 +858,7 @@ function onOpen() {
     .addSeparator()
     .addItem('Allow retake for selected attempt(s)', 'allowRetakeForSelection')
     .addItem('Recalculate scores (after grading essays)', 'recalculateScores')
+    .addItem('Add image to question…', 'openImageDialog')
     .addItem('Check question bank for errors', 'checkQuestionBank')
     .addToUi();
 }
@@ -624,6 +950,7 @@ function builderGetData() {
       end: e.end ? Utilities.formatDate(e.end, tz, "yyyy-MM-dd'T'HH:mm") : '',
       limitMin: e.limitMin, shuffleQuestions: e.shuffleQuestions, shuffleChoices: e.shuffleChoices,
       showScore: e.showScore, active: toBool_(r.Active, true), link: examLink_(e.id, settings),
+      displayMode: e.displayMode, allowBack: e.allowBack, faceMode: e.faceMode, cameraPreview: e.cameraPreview, questionSeconds: e.questionSeconds, pickCount: e.pickCount, topicCounts: e.topicCounts, allowedDevices: e.allowedDevices,
     };
   });
   return {
@@ -632,7 +959,7 @@ function builderGetData() {
     studentAppUrl: settings.STUDENT_APP_URL,
     questions: Object.keys(bank).map(id => {
       const q = bank[id];
-      return { id: q.id, type: q.type || q.rawType, text: q.text, choices: q.choices, points: q.points, topic: q.topic, problems: validateQuestion_(q) };
+      return { id: q.id, type: q.type || q.rawType, text: q.text, choices: q.choices, points: q.points, topic: q.topic, image: !!q.image, problems: validateQuestion_(q) };
     }),
     exams: exams,
     courses: knownCourses_(),
@@ -666,6 +993,14 @@ function builderSaveExam(form) {
   if (start && end && end <= start) throw new Error('The end date/time must be after the start.');
   const limit = Number(form.limitMin) || 0;
   if (limit < 0) throw new Error('Time limit cannot be negative.');
+  const topicCounts = (form.topicCounts || []).map(tc => ({ topic: String(tc.topic || '').trim(), count: Math.round(Number(tc.count) || 0) }))
+    .filter(tc => tc.topic && tc.count > 0);
+  topicCounts.forEach(tc => {
+    const available = ids.filter(id => normTopic_(bank[id].topic) === normTopic_(tc.topic)).length;
+    if (tc.count > available) throw new Error('Topic "' + tc.topic + '": you asked for ' + tc.count + ' but only ' + available + ' selected question(s) have that topic.');
+  });
+  const pick = topicCounts.length ? 0 : Math.max(0, Math.round(Number(form.pickCount) || 0));
+  if (pick > ids.length) throw new Error('"Questions per student" (' + pick + ') is more than the ' + ids.length + ' questions selected.');
 
   let examId = String(form.id || '').trim().replace(/\s+/g, '-');
   if (examId && !/^[A-Za-z0-9_-]+$/.test(examId)) throw new Error('Exam ID may contain only letters, numbers, - and _.');
@@ -685,6 +1020,14 @@ function builderSaveExam(form) {
     ShowScore: !!form.showScore,
     Active: form.active !== false,
     Course: asText_(String(form.course || '').trim()),
+    DisplayMode: form.displayMode === 'ONE' ? 'ONE' : 'ALL',
+    FaceMonitor: parseFaceMode_(form.faceMode),
+    CameraPreview: form.cameraPreview !== false,
+    QuestionsPerStudent: pick,
+    TopicCounts: asText_(topicCounts.map(tc => tc.topic + ': ' + tc.count).join(' | ')),
+    AllowedDevices: parseAllowedDevices_(form.allowedDevices),
+    QuestionTimeSeconds: form.displayMode === 'ONE' ? Math.max(0, Math.round(Number(form.questionSeconds) || 0)) : 0,
+    AllowBack: form.displayMode === 'ONE' ? (form.allowBack !== false && !(Number(form.questionSeconds) > 0)) : true,
   };
   const existing = table.rows.find(r => String(r.ExamID).trim().toLowerCase() === examId.toLowerCase());
   if (existing) {
@@ -766,9 +1109,93 @@ function checkQuestionBank() {
   const problems = [];
   Object.keys(bank).forEach(id => {
     const p = validateQuestion_(bank[id]);
+    const fileId = driveFileId_(bank[id].image);
+    if (fileId) { try { driveImageDataUrl_(fileId); } catch (e) { p.push(e.message); } }
     if (p.length) problems.push('Row ' + bank[id].row + ' (' + id + '): ' + p.join('; '));
   });
   safeAlert_(problems.length ? 'Problems found:\n\n' + problems.join('\n') : 'All ' + Object.keys(bank).length + ' questions look good.');
+}
+
+// ───────────────────────────── Question images ─────────────────────────────
+
+/** Reads a Drive image (the teacher's own or shared with them) as a data URL. */
+function driveImageDataUrl_(fileId) {
+  let blob;
+  try { blob = DriveApp.getFileById(fileId).getBlob(); } catch (e) {
+    throw apiError_('IMAGE_UNAVAILABLE', 'A question picture could not be loaded from Google Drive (check the link, and that the file is yours or shared with you).');
+  }
+  const bytes = blob.getBytes();
+  if (bytes.length > MAX_IMAGE_BYTES) {
+    throw apiError_('IMAGE_TOO_LARGE', 'A question picture is larger than 2 MB. Add it again with Exam Admin → Add image to question, which shrinks it.');
+  }
+  const type = String(blob.getContentType() || '');
+  if (!/^image\//.test(type)) throw apiError_('IMAGE_UNAVAILABLE', 'A question picture link does not point to an image file.');
+  return 'data:' + type + ';base64,' + Utilities.base64Encode(bytes);
+}
+
+/** The Drive folder uploads go into (created on first use). */
+function imageFolder_() {
+  const props = PropertiesService.getScriptProperties();
+  const id = props.getProperty('IMAGE_FOLDER_ID');
+  if (id) { try { return DriveApp.getFolderById(id); } catch (e) { /* deleted: make a new one */ } }
+  const folder = DriveApp.createFolder('Online Exam - question images');
+  props.setProperty('IMAGE_FOLDER_ID', folder.getId());
+  return folder;
+}
+
+function openImageDialog() {
+  const sheet = ss_().getActiveSheet();
+  if (sheet.getName() !== SHEET.QUESTIONS) {
+    SpreadsheetApp.getUi().alert('Open the "Questions" sheet and click any cell in the question\'s row first.');
+    return;
+  }
+  const html = HtmlService.createHtmlOutputFromFile('ImageUpload').setWidth(560).setHeight(620);
+  SpreadsheetApp.getUi().showModalDialog(html, 'Add image to question');
+}
+
+/** Called by ImageUpload.html: the question in the selected row and its current picture. */
+function imageDialogGet() {
+  const sheet = ss_().getActiveSheet();
+  const row = sheet.getActiveRange().getRow();
+  const q = readTable_(SHEET.QUESTIONS).rows.find(r => r._row === row);
+  if (sheet.getName() !== SHEET.QUESTIONS || !q || !String(q.QuestionID).trim()) {
+    throw new Error('Click a cell in a question\'s row in the Questions sheet, then open this window again.');
+  }
+  const image = String(q.Image || '').trim();
+  let preview = '', previewError = '';
+  if (driveFileId_(image)) { try { preview = driveImageDataUrl_(driveFileId_(image)); } catch (e) { previewError = e.message; } }
+  else if (externalImageUrl_(image)) preview = externalImageUrl_(image);
+  return { id: String(q.QuestionID).trim(), text: String(q.Question), image: image, preview: preview, previewError: previewError };
+}
+
+/**
+ * Called by ImageUpload.html. payload is one of:
+ *   { dataUrl, name }  – an uploaded picture (already shrunk below 2 MB in the browser)
+ *   { link }           – a Google Drive / Dropbox / direct image link
+ *   { remove: true }   – no picture
+ */
+function imageDialogSave(questionId, payload) {
+  const table = readTable_(SHEET.QUESTIONS);
+  const q = table.rows.find(r => String(r.QuestionID).trim() === String(questionId));
+  if (!q) throw new Error('Question ' + questionId + ' was not found.');
+  let value = '';
+  if (payload && payload.dataUrl) {
+    const m = String(payload.dataUrl).match(/^data:(image\/(?:jpeg|png|gif|webp));base64,([A-Za-z0-9+/=]+)$/);
+    if (!m) throw new Error('That file is not a JPEG, PNG, GIF or WebP picture.');
+    const bytes = Utilities.base64Decode(m[2]);
+    if (bytes.length > MAX_IMAGE_BYTES) throw new Error('The picture is still larger than 2 MB. Try a smaller picture.');
+    const ext = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp' }[m[1]];
+    const file = imageFolder_().createFile(Utilities.newBlob(bytes, m[1], String(questionId) + '-' + Date.now() + '.' + ext));
+    value = file.getUrl();
+  } else if (payload && payload.link) {
+    value = String(payload.link).trim();
+    if (!driveFileId_(value) && !externalImageUrl_(value)) throw new Error('Paste a Google Drive link, a Dropbox link, or a direct link that starts with https://');
+    if (driveFileId_(value)) driveImageDataUrl_(driveFileId_(value)); // check it can be read and is ≤ 2 MB
+  } else if (!(payload && payload.remove)) {
+    throw new Error('Choose a picture or paste a link first.');
+  }
+  updateFields_(table, q, { Image: value });
+  return { image: value };
 }
 
 // ───────────────────────────── Sheet helpers ─────────────────────────────
@@ -838,11 +1265,19 @@ function getSettings_() {
   try {
     readTable_(SHEET.SETTINGS).rows.forEach(r => {
       const k = String(r.Key).trim();
-      if (k && r.Value !== '' && r.Value !== null) s[k] = r.Value;
+      // An empty TIME_WARNINGS means "no warnings"; other empty values fall back to the default
+      if (k && ((r.Value !== '' && r.Value !== null) || k === 'TIME_WARNINGS')) s[k] = r.Value;
     });
   } catch (e) { /* use defaults */ }
   s.BLUR_GRACE_SECONDS = Math.max(0, Number(s.BLUR_GRACE_SECONDS) || 0);
   s.SUBMIT_GRACE_SECONDS = Math.max(0, Number(s.SUBMIT_GRACE_SECONDS) || 0);
+  s.FACE_GRACE_SECONDS = Math.max(1, Number(s.FACE_GRACE_SECONDS) || 3);
+  s.PHONE_DETECTION = toBool_(s.PHONE_DETECTION, true);
+  s.OPEN_COUNTDOWN = toBool_(s.OPEN_COUNTDOWN, true);
+  s.TIME_WARNINGS = String(s.TIME_WARNINGS === undefined || s.TIME_WARNINGS === null ? '' : s.TIME_WARNINGS)
+    .split(/[,;\s]+/).map(Number).filter(n => n > 0).sort((a, b) => b - a);
+  s.RECONNECT_SECONDS = s.RECONNECT_SECONDS === '' ? 60 : Math.max(0, Math.round(Number(s.RECONNECT_SECONDS) || 0));
+  s.MAX_RECONNECTS = Math.max(0, Math.round(Number(s.MAX_RECONNECTS) || 0));
   s.REQUIRE_MONITOR_CHECK = toBool_(s.REQUIRE_MONITOR_CHECK, true);
   s.BLOCK_COPY_PASTE = toBool_(s.BLOCK_COPY_PASTE, true);
   s.STUDENT_APP_URL = String(s.STUDENT_APP_URL || '').trim();
