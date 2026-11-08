@@ -95,6 +95,27 @@
 
   // ───────── Monitor & browser checks ─────────
 
+  /**
+   * 'computer' | 'tablet' | 'phone'. iPads ask for desktop pages and report "Macintosh",
+   * so a touch screen on a Mac means iPad.
+   */
+  function deviceType() {
+    const ua = navigator.userAgent || '';
+    const touch = navigator.maxTouchPoints || 0;
+    if (/iPhone|iPod|Windows Phone/i.test(ua) || (/Android/i.test(ua) && /Mobile/i.test(ua))) return 'phone';
+    if (/iPad/i.test(ua) || (/Macintosh/i.test(ua) && touch > 1) || /Android/i.test(ua) || /Tablet/i.test(ua)) return 'tablet';
+    if (navigator.userAgentData && navigator.userAgentData.mobile) return 'phone';
+    return 'computer';
+  }
+
+  const DEVICE_NAME = { computer: 'Computer', tablet: 'Tablet', phone: 'Phone' };
+
+  function deviceAllowed() {
+    const allowed = (state.info && state.info.exam.allowedDevices) || 'COMPUTER';
+    const d = deviceType();
+    return allowed === 'ANY' || d === 'computer' || (allowed === 'TABLET' && d === 'tablet');
+  }
+
   /** 'single' | 'multiple' | 'unsupported' */
   function monitorStatus() {
     if (!window.screen || !('isExtended' in window.screen)) return 'unsupported';
@@ -110,6 +131,18 @@
   }
 
   function preChecksPass() {
+    const d = deviceType();
+    const allowed = state.info.exam.allowedDevices || 'COMPUTER';
+    const devOk = deviceAllowed();
+    setCheck('checkDevice', devOk, DEVICE_NAME[d] + (devOk ? ''
+      : allowed === 'TABLET' ? ' — this exam must be taken on a computer or a tablet, not a phone.'
+        : ' — this exam must be taken on a laptop or desktop computer.'));
+    if (d !== 'computer') {
+      // Tablets and phones: no second-monitor check; leaving the exam app still voids it.
+      setCheck('checkBrowser', true, 'Supported');
+      setCheck('checkMonitor', true, 'Not checked on ' + (d === 'tablet' ? 'tablets' : 'phones'));
+      return devOk && cameraCheckPasses();
+    }
     const m = monitorStatus();
     const browserOk = m !== 'unsupported' || !state.rules.requireMonitorCheck;
     setCheck('checkBrowser', browserOk, m === 'unsupported'
@@ -121,7 +154,7 @@
     else setCheck('checkMonitor', m === 'single', m === 'single'
       ? 'One screen detected'
       : 'A second monitor is connected. Disconnect it to start the exam.');
-    return browserOk && m !== 'multiple' && cameraCheckPasses();
+    return devOk && browserOk && m !== 'multiple' && cameraCheckPasses();
   }
 
   // ───────── Camera ─────────
@@ -269,6 +302,9 @@
     $('factWindow').textContent = (exam.startText ? 'From ' + exam.startText : 'Now') + (exam.endText ? ' until ' + exam.endText : '');
     $('accessCodeWrap').hidden = !state.info.requiresAccessCode;
     $('rulePaste').hidden = !rules.blockCopyPaste;
+    if (deviceType() !== 'computer') {
+      $('ruleMonitor').innerHTML = '<b>Stay in this browser.</b> Switching to another app, going to the home screen, or opening another tab will void your exam.';
+    }
     state.cam.required = exam.faceMode === 'START' || exam.faceMode === 'ALWAYS';
     state.cam.continuous = exam.faceMode === 'ALWAYS';
     $('ruleCamera').hidden = !state.cam.required;
@@ -329,6 +365,7 @@
         accessCode: $('accessCode').value.trim(),
         env: {
           userAgent: navigator.userAgent,
+          device: deviceType(),
           isExtended: m === 'multiple',
           monitorCheck: m === 'unsupported' ? 'unsupported' : 'supported',
           camera: state.cam.required && window.ExamCamera.status() === 'OK' ? 'ok' : 'none',
@@ -874,7 +911,7 @@
   function onFocus() { clearTimeout(blurTimer); unfocusedSince = null; }
 
   function checkMonitorDuringExam() {
-    if (state.active && monitorStatus() === 'multiple') {
+    if (state.active && deviceType() === 'computer' && monitorStatus() === 'multiple') {
       voidExam('SECOND_MONITOR', 'screen.isExtended became true during the exam.');
     }
   }

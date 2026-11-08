@@ -34,11 +34,11 @@ const HEADERS = {
   Questions: ['QuestionID', 'Type', 'Question', 'Choices', 'Answer', 'Points', 'Topic'],
   Exams: ['ExamID', 'Title', 'Instructions', 'QuestionIDs', 'StartDateTime', 'EndDateTime',
     'TimeLimitMinutes', 'ShuffleQuestions', 'ShuffleChoices', 'ShowScore', 'Active', 'Course',
-    'DisplayMode', 'AllowBack', 'FaceMonitor', 'CameraPreview', 'QuestionTimeSeconds', 'QuestionsPerStudent', 'TopicCounts'],
+    'DisplayMode', 'AllowBack', 'FaceMonitor', 'CameraPreview', 'QuestionTimeSeconds', 'QuestionsPerStudent', 'TopicCounts', 'AllowedDevices'],
   Roster: ['StudentID', 'Name', 'Email', 'AccessCode', 'Courses'],
   Attempts: ['AttemptID', 'ExamID', 'StudentID', 'Name', 'Status', 'StartedAt', 'Deadline',
     'SubmittedAt', 'Score', 'MaxScore', 'Percent', 'PendingEssays', 'Late', 'VoidReason',
-    'VoidedAt', 'AllowRetake', 'IsRetake', 'UserAgent', 'Course', 'Warnings', 'LastSeen', 'DisconnectedAt', 'Reconnects'],
+    'VoidedAt', 'AllowRetake', 'IsRetake', 'UserAgent', 'Course', 'Warnings', 'LastSeen', 'DisconnectedAt', 'Reconnects', 'Device'],
   Responses: ['AttemptID', 'ExamID', 'StudentID', 'QuestionID', 'Type', 'Question',
     'StudentAnswer', 'CorrectAnswer', 'IsCorrect', 'PointsEarned', 'MaxPoints'],
   Violations: ['Timestamp', 'AttemptID', 'ExamID', 'StudentID', 'Name', 'Event', 'Detail'],
@@ -49,7 +49,7 @@ const HEADERS = {
 const DEFAULT_SETTINGS = [
   ['STUDENT_APP_URL', '', 'Address of the student exam page (your GitHub Pages URL). Used to build exam links.'],
   ['BLUR_GRACE_SECONDS', 0, 'Seconds the exam window may lose focus (Alt+Tab, clicking another app) before the exam is voided. 0 = immediately.'],
-  ['REQUIRE_MONITOR_CHECK', true, 'TRUE = only browsers that can detect extra monitors (Chrome / Edge on a computer) may take exams.'],
+  ['REQUIRE_MONITOR_CHECK', true, 'Computers only: TRUE = the browser must be able to detect extra monitors (Chrome / Edge). Tablets and phones skip the monitor check. Which devices may take an exam is set per exam in the Exam Builder.'],
   ['BLOCK_COPY_PASTE', true, 'TRUE = disable copy, paste and right-click on the exam page.'],
   ['SUBMIT_GRACE_SECONDS', 60, 'Extra seconds after the deadline during which a submission is still on time (network delays).'],
   ['FACE_GRACE_SECONDS', 3, 'Camera-monitored exams: seconds a problem (face hidden, camera covered, extra person, phone) must last before it counts. 1st time = warning, 2nd time = voided.'],
@@ -125,6 +125,7 @@ const API_ = {
         course: exam.course,
         displayMode: exam.displayMode,
         faceMode: exam.faceMode,
+        allowedDevices: exam.allowedDevices,
         cameraPreview: exam.cameraPreview,
         questionSeconds: exam.questionSeconds,
         allowBack: exam.allowBack,
@@ -228,11 +229,20 @@ const API_ = {
         if (status === 'CLOSED' && !isRetake) {
           throw apiError_('CLOSED', 'This exam closed on ' + fmtDate_(exam.end, tz_()) + '.');
         }
-        if (env.isExtended === true) {
-          throw apiError_('SECOND_MONITOR', 'A second monitor is connected. Disconnect it before starting the exam.');
+        const device = deviceOf_(env);
+        if (!deviceAllowed_(exam.allowedDevices, device)) {
+          throw apiError_('DEVICE_NOT_ALLOWED', exam.allowedDevices === 'TABLET'
+            ? 'This exam must be taken on a computer or a tablet, not a phone.'
+            : 'This exam must be taken on a laptop or desktop computer.');
         }
-        if (settings.REQUIRE_MONITOR_CHECK && env.monitorCheck !== 'supported') {
-          throw apiError_('UNSUPPORTED_BROWSER', 'Please open the exam in Google Chrome or Microsoft Edge on a laptop or desktop computer.');
+        // The second-monitor check applies to computers; tablets and phones skip it.
+        if (device === 'computer') {
+          if (env.isExtended === true) {
+            throw apiError_('SECOND_MONITOR', 'A second monitor is connected. Disconnect it before starting the exam.');
+          }
+          if (settings.REQUIRE_MONITOR_CHECK && env.monitorCheck !== 'supported') {
+            throw apiError_('UNSUPPORTED_BROWSER', 'Please open the exam in Google Chrome or Microsoft Edge on a laptop or desktop computer.');
+          }
         }
         if (exam.faceMode !== 'OFF' && env.camera !== 'ok') {
           throw apiError_('CAMERA_REQUIRED', 'This exam requires your camera. Turn it on and make sure your face is visible.');
@@ -264,6 +274,7 @@ const API_ = {
           Reconnects: 0,
           UserAgent: asText_(String(env.userAgent || '').slice(0, 300)),
           Course: asText_(exam.course),
+          Device: device,
         };
         appendObj_(attempts, attempt, ['AllowRetake']);
       }
@@ -537,6 +548,7 @@ function examConfig_(row) {
     questionSeconds: Math.max(0, Math.round(Number(row.QuestionTimeSeconds) || 0)),
     pickCount: Math.max(0, Math.round(Number(row.QuestionsPerStudent) || 0)),
     topicCounts: parseTopicCounts_(row.TopicCounts),
+    allowedDevices: parseAllowedDevices_(row.AllowedDevices),
   };
   // "No going back" only makes sense when questions are shown one at a time
   cfg.allowBack = cfg.displayMode === 'ONE' ? toBool_(row.AllowBack, true) : true;
@@ -588,6 +600,33 @@ function attemptQuestions_(exam, pool, attemptId) {
     qs = pool.filter(q => picked[q.id]);
   }
   return exam.shuffleQuestions ? seededShuffle_(qs, String(attemptId)) : qs;
+}
+
+/**
+ * Exams → AllowedDevices:
+ *   COMPUTER – laptops and desktops only (empty = this, as before)
+ *   TABLET   – computers and tablets
+ *   ANY      – computers, tablets and phones
+ */
+function parseAllowedDevices_(v) {
+  const s = String(v || '').trim().toUpperCase();
+  return s === 'TABLET' || s === 'ANY' ? s : 'COMPUTER';
+}
+
+function deviceAllowed_(allowed, device) {
+  if (allowed === 'ANY') return true;
+  if (allowed === 'TABLET') return device === 'computer' || device === 'tablet';
+  return device === 'computer';
+}
+
+/** The device the page reported, double-checked against the browser's user agent. */
+function deviceOf_(env) {
+  const ua = String(env.userAgent || '');
+  if (/iPhone|iPod|Windows Phone/i.test(ua) || (/Android/i.test(ua) && /Mobile/i.test(ua))) return 'phone';
+  const d = String(env.device || '');
+  if (d === 'phone' || d === 'tablet') return d;
+  if (/iPad|Tablet/i.test(ua) || /Android/i.test(ua)) return 'tablet';
+  return 'computer';
 }
 
 /** "Easy: 5 | Hard: 3" → [{ topic: 'Easy', count: 5 }, { topic: 'Hard', count: 3 }] */
@@ -863,7 +902,7 @@ function builderGetData() {
       end: e.end ? Utilities.formatDate(e.end, tz, "yyyy-MM-dd'T'HH:mm") : '',
       limitMin: e.limitMin, shuffleQuestions: e.shuffleQuestions, shuffleChoices: e.shuffleChoices,
       showScore: e.showScore, active: toBool_(r.Active, true), link: examLink_(e.id, settings),
-      displayMode: e.displayMode, allowBack: e.allowBack, faceMode: e.faceMode, cameraPreview: e.cameraPreview, questionSeconds: e.questionSeconds, pickCount: e.pickCount, topicCounts: e.topicCounts,
+      displayMode: e.displayMode, allowBack: e.allowBack, faceMode: e.faceMode, cameraPreview: e.cameraPreview, questionSeconds: e.questionSeconds, pickCount: e.pickCount, topicCounts: e.topicCounts, allowedDevices: e.allowedDevices,
     };
   });
   return {
@@ -938,6 +977,7 @@ function builderSaveExam(form) {
     CameraPreview: form.cameraPreview !== false,
     QuestionsPerStudent: pick,
     TopicCounts: asText_(topicCounts.map(tc => tc.topic + ': ' + tc.count).join(' | ')),
+    AllowedDevices: parseAllowedDevices_(form.allowedDevices),
     QuestionTimeSeconds: form.displayMode === 'ONE' ? Math.max(0, Math.round(Number(form.questionSeconds) || 0)) : 0,
     AllowBack: form.displayMode === 'ONE' ? (form.allowBack !== false && !(Number(form.questionSeconds) > 0)) : true,
   };

@@ -48,7 +48,7 @@
         <h2>⚠ Read before you start</h2>
         <ul>
           <li><b>Switching tabs or windows will VOID your exam.</b> This includes opening another tab, minimizing the browser, using Alt+Tab / Cmd+Tab, or clicking another application.</li>
-          <li><b>Multiple monitors are prohibited.</b> Disconnect any second monitor, TV or projector <u>before</u> starting. Connecting one during the exam will void it.</li>
+          <li id="ruleMonitor"><b>Multiple monitors are prohibited.</b> Disconnect any second monitor, TV or projector <u>before</u> starting. Connecting one during the exam will void it.</li>
           <li id="ruleReload"><b>Do not refresh, close, or navigate away from this page.</b> That also voids your exam.</li>
           <li id="ruleCamera" hidden></li>
           <li id="ruleNav" hidden></li>
@@ -61,6 +61,7 @@
       <div class="checks">
         <h2>System check</h2>
         <ul>
+          <li id="checkDevice"><span class="dot"></span><span class="label">Device</span></li>
           <li id="checkBrowser"><span class="dot"></span><span class="label">Browser</span></li>
           <li id="checkMonitor"><span class="dot"></span><span class="label">Monitors</span></li>
           <li id="checkCamera" hidden><span class="dot"></span><span class="label">Camera</span></li>

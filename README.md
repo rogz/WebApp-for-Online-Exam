@@ -80,6 +80,10 @@ Use **Exam Admin → Check question bank for errors** to catch mistakes. You can
   - *One question at a time*: Next / Previous buttons plus numbered buttons to jump between questions.
     - Untick **Allow going back** to make it forward-only. There is no Previous button, and each answer is **locked on the server** when the student clicks Next, saved in the `Progress` sheet. Students are warned before skipping an unanswered question.
     - **Time limit per question** (seconds, 0 = none): a small ⏱ timer shows on each question. When it runs out, the exam moves to the next question, or submits after the last one. Going back is turned off automatically.
+- **Allowed devices**: *Computers only* (default, and for older exams), *Computers and tablets*, or *Any device, including phones*.
+  - On **tablets and phones**, the second-monitor check is skipped. Switching apps, going to the home screen or switching tabs still voids the exam.
+  - On **computers**, the monitor check always applies.
+  - The device is detected automatically (iPads in desktop mode included) and recorded in **Attempts → Device**.
 - **Camera / face check**: *Not required*, *Check face at the start only*, or *Monitor face during the whole exam* (see below).
 - **Questions per student** (0 = all): tick a pool, e.g. 50 questions, and enter 10. **Each student gets their own random 10.**
   - A student keeps the same set if they reconnect, and is graded only on their own questions.
@@ -162,7 +166,7 @@ With **Monitor face during the whole exam**:
   - the camera is turned off (this one counts immediately)
 - **1st offense:** a warning box. The student can only continue once the problem is fixed. It's logged in **Violations** as a warning, and **Attempts → Warnings** becomes 1.
 - **2nd offense:** the exam is voided, just like a tab switch.
-- Detection runs in the browser using Google MediaPipe, loaded from a CDN on first use (about 5 MB). Nothing is recorded or uploaded. Students need a webcam and Chrome or Edge.
+- Detection runs in the browser using Google MediaPipe, loaded from a CDN on first use (about 5 MB). Nothing is recorded or uploaded. Students need a webcam. On a computer that means Chrome or Edge; on a tablet or phone, the normal browser (Safari or Chrome).
 - Limits: a phone held below the desk or outside the camera's view can't be seen, and phone detection can sometimes miss or mistake objects. That's why a phone gets a warning first, not an instant void.
 
 ### Settings sheet
@@ -170,7 +174,7 @@ With **Monitor face during the whole exam**:
 |---|---|---|
 | `STUDENT_APP_URL` | — | Your GitHub Pages address (used to build the links) |
 | `BLUR_GRACE_SECONDS` | `0` | How long the window may lose focus before voiding. `0` voids immediately. Use `2`–`3` if clicks on browser pop-ups cause false voids. Tab switches always void immediately. |
-| `REQUIRE_MONITOR_CHECK` | `TRUE` | Only allow browsers that can detect extra monitors (Chrome or Edge on a computer). Set `FALSE` to allow Firefox, Safari, and phones; monitors can't be checked there. |
+| `REQUIRE_MONITOR_CHECK` | `TRUE` | Computers only: the browser must be able to detect extra monitors (Chrome or Edge). Tablets and phones skip this check. Which devices may take an exam is set per exam (**Allowed devices**). |
 | `BLOCK_COPY_PASTE` | `TRUE` | Disables copy, paste, and right-click during the exam |
 | `SUBMIT_GRACE_SECONDS` | `60` | Seconds after the deadline that a submission still counts as on time |
 | `FACE_GRACE_SECONDS` | `3` | Camera exams: how long a problem must last before it counts as an offense |
@@ -189,7 +193,7 @@ With **Monitor face during the whole exam**:
 | Switching tabs, minimizing, opening a new window over the exam | ✅ all browsers | Voided |
 | Alt+Tab / Cmd+Tab, clicking another app or the other screen | ✅ all browsers | Voided |
 | Refreshing or closing the page | ✅ | Allowed to reconnect within `RECONNECT_SECONDS` (max `MAX_RECONNECTS` times), otherwise voided |
-| Second monitor connected before start | ✅ Chrome/Edge (`screen.isExtended`) | Can't start |
+| Second monitor connected before start | ✅ Chrome/Edge on computers (`screen.isExtended`). Not checked on tablets and phones. | Can't start |
 | Second monitor connected during the exam | ✅ Chrome/Edge | Voided |
 | Phone, second computer, another person, HDMI splitter or "mirror" mode | ❌ no website can see these | — |
 
@@ -208,6 +212,7 @@ docs/               student exam page (served by GitHub Pages)
 ```
 
 ## Developer tests
+`tests/devices.test.js` covers Allowed devices with emulated iPad, iPad in desktop mode, Galaxy Tab, iPhone and Pixel.
 `tests/builder.test.js` covers picking per topic, including the real Exam Builder window with Google's parts simulated.
 `tests/timing.test.js` covers the countdowns, warnings, per-question timer, and reconnect rules.
 `tests/camera.test.js` runs the camera flow with the real MediaPipe detector and a fake webcam. See the comments at the top of the file for setup.

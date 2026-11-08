@@ -70,6 +70,13 @@
       <input type="number" id="questionSeconds" min="0" value="0" oninput="syncNav()">
       <div class="muted">When time runs out the exam moves to the next question. Going back is turned off.</div>
     </div>
+    <label for="allowedDevices">Allowed devices</label>
+    <select id="allowedDevices">
+      <option value="COMPUTER">Computers only (laptop / desktop)</option>
+      <option value="TABLET">Computers and tablets</option>
+      <option value="ANY">Any device, including phones</option>
+    </select>
+    <div class="muted">Tablets and phones skip the second-monitor check; switching apps still voids the exam.</div>
     <label for="faceMode">Camera / face check</label>
     <select id="faceMode" onchange="syncCam()">
       <option value="OFF">Not required</option>
@@ -251,6 +258,7 @@
           ? e.topicCounts.reduce(function (a, tc) { return a + tc.count; }, 0) + ' of ' + e.questionIds.length + ' (' + e.topicCounts.map(function (tc) { return tc.count + ' ' + esc(tc.topic); }).join(', ') + ')'
           : (e.pickCount && e.pickCount < e.questionIds.length ? e.pickCount + ' of ' + e.questionIds.length : e.questionIds.length)) + ' questions · ' + (e.limitMin ? e.limitMin + ' min' : 'no limit') +
         (e.displayMode === 'ONE' ? ' · one at a time' + (e.allowBack ? '' : ', no going back') + (e.questionSeconds ? ', ' + e.questionSeconds + ' s per question' : '') : '') +
+        (e.allowedDevices === 'TABLET' ? ' · computers + tablets' : e.allowedDevices === 'ANY' ? ' · any device' : '') +
         (e.faceMode === 'ALWAYS' ? ' · 📷 camera monitored' + (e.cameraPreview ? '' : ' (no preview)') : e.faceMode === 'START' ? ' · 📷 face check at start' : '') +
         (e.start ? ' · opens ' + esc(e.start.replace('T', ' ')) : '') + (e.end ? ' · closes ' + esc(e.end.replace('T', ' ')) : '') + '</div>' +
         '<div class="actions"><button onclick="editExam(' + i + ')">Edit</button>' +
@@ -271,6 +279,7 @@
     $('displayMode').value = e.displayMode || 'ALL'; $('allowBack').checked = e.allowBack !== false;
     $('questionSeconds').value = e.questionSeconds || 0; syncNav();
     $('faceMode').value = e.faceMode || 'OFF';
+    $('allowedDevices').value = e.allowedDevices || 'COMPUTER';
     $('cameraPreview').checked = e.cameraPreview !== false; syncCam();
     selected = {}; selectedOrder = [];
     e.questionIds.forEach(function (id) { selected[id] = true; selectedOrder.push(id); });
@@ -286,6 +295,7 @@
     $('limit').value = 30; $('pickCount').value = 0; topicPick = {};
     ['shuffleQuestions', 'shuffleChoices', 'showScore', 'active', 'allowBack'].forEach(function (id) { $(id).checked = true; });
     $('faceMode').value = 'ALWAYS';
+    $('allowedDevices').value = 'COMPUTER';
     $('cameraPreview').checked = true; syncCam();
     $('displayMode').value = 'ALL'; $('questionSeconds').value = 0; syncNav();
     selected = {}; selectedOrder = [];
@@ -298,7 +308,7 @@
       start: $('start').value, end: $('end').value, limitMin: $('limit').value, pickCount: $('pickCount').value, topicCounts: activeTopicPicks(),
       shuffleQuestions: $('shuffleQuestions').checked, shuffleChoices: $('shuffleChoices').checked,
       showScore: $('showScore').checked, active: $('active').checked, questionIds: selectedOrder.slice(),
-      displayMode: $('displayMode').value, allowBack: $('allowBack').checked, questionSeconds: $('questionSeconds').value, faceMode: $('faceMode').value, cameraPreview: $('cameraPreview').checked
+      displayMode: $('displayMode').value, allowBack: $('allowBack').checked, questionSeconds: $('questionSeconds').value, faceMode: $('faceMode').value, allowedDevices: $('allowedDevices').value, cameraPreview: $('cameraPreview').checked
     };
     $('saveBtn').disabled = true;
     google.script.run.withSuccessHandler(function (r) {
