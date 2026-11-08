@@ -34,7 +34,7 @@ const HEADERS = {
   Questions: ['QuestionID', 'Type', 'Question', 'Choices', 'Answer', 'Points', 'Topic'],
   Exams: ['ExamID', 'Title', 'Instructions', 'QuestionIDs', 'StartDateTime', 'EndDateTime',
     'TimeLimitMinutes', 'ShuffleQuestions', 'ShuffleChoices', 'ShowScore', 'Active', 'Course',
-    'DisplayMode', 'AllowBack', 'FaceMonitor'],
+    'DisplayMode', 'AllowBack', 'FaceMonitor', 'CameraPreview'],
   Roster: ['StudentID', 'Name', 'Email', 'AccessCode', 'Courses'],
   Attempts: ['AttemptID', 'ExamID', 'StudentID', 'Name', 'Status', 'StartedAt', 'Deadline',
     'SubmittedAt', 'Score', 'MaxScore', 'Percent', 'PendingEssays', 'Late', 'VoidReason',
@@ -115,6 +115,7 @@ const API_ = {
         course: exam.course,
         displayMode: exam.displayMode,
         faceMode: exam.faceMode,
+        cameraPreview: exam.cameraPreview,
         allowBack: exam.allowBack,
         instructions: exam.instructions,
         questionCount: questions.length,
@@ -478,6 +479,7 @@ function examConfig_(row) {
     course: String(row.Course || '').trim(),
     displayMode: String(row.DisplayMode || '').trim().toUpperCase() === 'ONE' ? 'ONE' : 'ALL',
     faceMode: parseFaceMode_(row.FaceMonitor),
+    cameraPreview: toBool_(row.CameraPreview, true),
   };
   // "No going back" only makes sense when questions are shown one at a time
   cfg.allowBack = cfg.displayMode === 'ONE' ? toBool_(row.AllowBack, true) : true;
@@ -704,7 +706,7 @@ function builderGetData() {
       end: e.end ? Utilities.formatDate(e.end, tz, "yyyy-MM-dd'T'HH:mm") : '',
       limitMin: e.limitMin, shuffleQuestions: e.shuffleQuestions, shuffleChoices: e.shuffleChoices,
       showScore: e.showScore, active: toBool_(r.Active, true), link: examLink_(e.id, settings),
-      displayMode: e.displayMode, allowBack: e.allowBack, faceMode: e.faceMode,
+      displayMode: e.displayMode, allowBack: e.allowBack, faceMode: e.faceMode, cameraPreview: e.cameraPreview,
     };
   });
   return {
@@ -768,6 +770,7 @@ function builderSaveExam(form) {
     Course: asText_(String(form.course || '').trim()),
     DisplayMode: form.displayMode === 'ONE' ? 'ONE' : 'ALL',
     FaceMonitor: parseFaceMode_(form.faceMode),
+    CameraPreview: form.cameraPreview !== false,
     AllowBack: form.displayMode === 'ONE' ? form.allowBack !== false : true,
   };
   const existing = table.rows.find(r => String(r.ExamID).trim().toLowerCase() === examId.toLowerCase());

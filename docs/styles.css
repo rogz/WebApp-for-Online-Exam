@@ -169,9 +169,20 @@ textarea.essay { min-height: 160px; resize: vertical; }
   position: absolute; left: 6px; bottom: 6px; right: 6px; padding: 2px 8px; border-radius: 6px;
   font-size: 12px; font-weight: 600; background: rgba(0, 0, 0, .65); color: #fff; text-align: center;
 }
+/* Wide screens: corner preview sits in the empty margin beside the questions */
 .cam-float { position: fixed; right: 16px; bottom: 16px; z-index: 50; }
 .cam-float .cam-box { width: 160px; box-shadow: 0 4px 16px rgba(0, 0, 0, .3); }
-@media (max-width: 560px) { .cam-float .cam-box { width: 110px; } }
+/* Narrower screens: the corner would cover questions, so show a small thumbnail in the top bar */
+@media (max-width: 1199px) {
+  .cam-float { position: static; }
+  .cam-float .cam-box { width: 60px; border-width: 2px; border-radius: 6px; box-shadow: none; }
+  .cam-float .cam-badge { display: none; }
+}
+/* Preview turned off by the teacher: the video keeps playing (needed for detection) but is invisible */
+.cam-float.preview-off { position: fixed; left: 0; top: 0; width: 2px; height: 2px; opacity: 0; pointer-events: none; overflow: hidden; }
+.cam-float.preview-off .cam-box { width: 2px; border: 0; }
+.cam-indicator { font-size: 13px; font-weight: 600; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--ok); color: var(--ok); white-space: nowrap; }
+.cam-indicator.bad { border-color: var(--danger); color: var(--danger); }
 .modal-backdrop.warn { background: rgba(120, 80, 0, .8); }
 .modal-backdrop.warn .modal { border: 3px solid #e0a000; text-align: center; }
 .modal-backdrop.warn h2 { color: var(--warn-text); }

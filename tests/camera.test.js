@@ -21,6 +21,8 @@ const st = gas.sheet('Settings'); const sh = st.data[0];
 st.data.forEach((r, i) => { if (r[sh.indexOf('Key')] === 'FACE_GRACE_SECONDS') st.set(i + 1, sh.indexOf('Value') + 1, 1); });
 gas.ctx.builderSaveExam({ id: 'CAM', title: 'Camera quiz', questionIds: ['Q001', 'Q003'], start: '', end: '', limitMin: 10, showScore: true, active: true, faceMode: 'ALWAYS' });
 gas.ctx.builderSaveExam({ id: 'CAM-START', title: 'Start check quiz', questionIds: ['Q001', 'Q003'], start: '', end: '', limitMin: 10, showScore: true, active: true, faceMode: 'START' });
+gas.ctx.builderSaveExam({ id: 'CAM-NOPREV', title: 'Hidden preview quiz', questionIds: ['Q001', 'Q003', 'Q005', 'Q006', 'Q007'], start: '', end: '', limitMin: 10, showScore: true, active: true, faceMode: 'ALWAYS', cameraPreview: false });
+gas.ctx.builderSaveExam({ id: 'CAM-LONG', title: 'Layout quiz', questionIds: ['Q001', 'Q002', 'Q003', 'Q004', 'Q005', 'Q006', 'Q007', 'Q008'], start: '', end: '', limitMin: 10, showScore: true, active: true, faceMode: 'ALWAYS' });
 gas.ctx.builderSaveExam({ id: 'CAM-OFF', title: 'No camera quiz', questionIds: ['Q001', 'Q003'], start: '', end: '', limitMin: 10, showScore: true, active: true, faceMode: 'OFF' });
 
 let failures = 0;
@@ -195,6 +197,61 @@ const serveFile = (route, file) => route.fulfill({ body: fs.readFileSync(file), 
   // Older sheets: FaceMonitor TRUE means monitor always
   ok(gas.ctx.parseFaceMode_(true) === 'ALWAYS' && gas.ctx.parseFaceMode_('TRUE') === 'ALWAYS' && gas.ctx.parseFaceMode_('') === 'OFF' && gas.ctx.parseFaceMode_('start') === 'START', 'FaceMonitor values parsed');
   ok(gas.sheet('Exams').objects().find(e => e.ExamID === 'CAM-START').FaceMonitor === 'START', 'sheet stores START');
+
+  // Preview must never cover questions, choices or buttons, at any screen width
+  const startCamExam = async (pg, id) => {
+    await setCam(pg, 'face');
+    await pg.fill('#studentId', id); await pg.fill('#studentName', 'Layout ' + id); await pg.check('#agree');
+    await pg.click('#camBtn');
+    await pg.waitForFunction(() => document.querySelector('#checkCamera').className === 'ok', null, { timeout: 60000 });
+    await pg.click('#startBtn');
+    await pg.waitForSelector('#screen-exam:not([hidden])');
+  };
+  const overlaps = pg => pg.evaluate(() => {
+    const cam = document.querySelector('#camBox').getBoundingClientRect();
+    const bar = document.querySelector('.topbar').getBoundingClientRect();
+    // Inside the sticky top bar it adds no obstruction (the bar itself is opaque)
+    if (cam.top >= bar.top && cam.bottom <= bar.bottom && cam.left >= bar.left && cam.right <= bar.right) {
+      return { bad: [], cam: [Math.round(cam.left), Math.round(cam.top), Math.round(cam.width)], inBar: true };
+    }
+    const hit = r => !(r.right <= cam.left || r.left >= cam.right || r.bottom <= cam.top || r.top >= cam.bottom);
+    const bad = [];
+    // scroll through the whole page and check every question, choice, input and button
+    for (let y = 0; y <= document.documentElement.scrollHeight; y += 200) {
+      window.scrollTo(0, y);
+      document.querySelectorAll('.question, .choice, .question input, .question textarea, #submitBar button, .pager button').forEach(el => {
+        if (el.offsetParent !== null && hit(el.getBoundingClientRect())) bad.push(el.className || el.id || el.tagName);
+      });
+    }
+    return { bad: [...new Set(bad)], cam: [Math.round(cam.left), Math.round(cam.top), Math.round(cam.width)] };
+  });
+  for (const [w, h] of [[1920, 1080], [1280, 800], [1024, 768], [800, 600]]) {
+    const pg = await ctx.newPage();
+    await pg.setViewportSize({ width: w, height: h });
+    pg.on('pageerror', e => errors.push(e.message));
+    await pg.goto('http://localhost:8124/?exam=CAM-LONG');
+    await pg.waitForSelector('#screen-rules:not([hidden])');
+    await startCamExam(pg, 'L' + w);
+    const r = await overlaps(pg);
+    ok(r.bad.length === 0, `preview covers nothing at ${w}x${h} (${r.inBar ? 'thumbnail in top bar' : 'corner'}: x=${r.cam[0]} y=${r.cam[1]}, ${r.cam[2]}px wide)` + (r.bad.length ? ' COVERS: ' + r.bad.join(',') : ''));
+    ok(await pg.evaluate(() => !document.querySelector('#camVideo').paused), `preview playing at ${w}px`);
+    if (w === 1280 || w === 1024) { await pg.evaluate(() => window.scrollTo(0, 0)); await pg.screenshot({ path: path.join(require('os').tmpdir(), `cam-layout-${w}.png`) }); }
+    await pg.close();
+  }
+
+  // Preview turned off: nothing shown, but monitoring still works
+  p = await open('CAM-NOPREV');
+  await startCamExam(p, 'NP1');
+  const box = await p.evaluate(() => { const r = document.querySelector('#camBox').getBoundingClientRect(); return [r.width, r.height, getComputedStyle(document.querySelector('#camFloat')).opacity]; });
+  ok(box[0] <= 2 && box[1] <= 2 && box[2] === '0', 'no visible preview when turned off: ' + box.join(','));
+  ok(await p.isVisible('#camIndicator') && (await p.textContent('#camIndicator')).includes('Camera on'), 'small "Camera on" indicator instead');
+  await setCam(p, 'none');
+  await p.waitForSelector('#faceWarnModal:not([hidden])', { timeout: 10000 });
+  ok(true, 'detection still works with preview off (warning shown)');
+  ok(await p.isVisible('#faceWarnVideo'), 'warning box still shows the camera so the student can fix it');
+  await p.screenshot({ path: path.join(require('os').tmpdir(), 'cam-nopreview.png') });
+  await p.close();
+  ok(gas.sheet('Exams').objects().find(e => e.ExamID === 'CAM-NOPREV').CameraPreview === false, 'sheet stores CameraPreview FALSE');
 
   ok(errors.length === 0, 'no page errors ' + errors.join(' | '));
   await browser.close(); server.close();

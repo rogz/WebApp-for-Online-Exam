@@ -10,6 +10,9 @@
   <header class="topbar">
     <div class="brand" id="brand">Online Exam</div>
     <div class="topbar-right" id="examBar" hidden>
+      <!-- Camera preview: bottom-right corner on wide screens, small thumbnail here on narrower ones -->
+      <div class="cam-float" id="camFloat" hidden></div>
+      <span class="cam-indicator" id="camIndicator" hidden>📷 Camera on</span>
       <span class="progress" id="progress">0 / 0 answered</span>
       <span class="timer" id="timer" aria-live="polite">--:--</span>
     </div>
@@ -163,9 +166,6 @@
       </div>
     </div>
   </div>
-
-  <!-- Floating camera preview during the exam -->
-  <div class="cam-float" id="camFloat" hidden></div>
 
   <!-- Busy -->
   <div class="modal-backdrop" id="busyModal" hidden>

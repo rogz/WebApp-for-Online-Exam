@@ -126,6 +126,11 @@ In the Exam Builder, choose **Camera / face check**:
 | **Monitor face during the whole exam** | Face must be visible to unlock Start | Monitored: 1 warning, then void |
 
 With **Monitor face during the whole exam**:
+- **Show students their camera preview** (Builder checkbox, on by default):
+  - *On, wide screens (≥ 1200 px):* a 160 px preview sits in the bottom-right corner, in the empty margin beside the questions.
+  - *On, narrower screens:* a small thumbnail sits in the top bar next to the timer.
+  - Either way it never covers questions, choices or buttons.
+  - *Off:* no picture, just a small "📷 Camera on" label in the top bar that turns red when there's a problem. Monitoring still works the same, and the warning box still shows the camera so the student can fix the problem.
 - On the rules screen, students click **Turn on camera**. **Start exam** stays disabled until exactly one face is clearly visible.
 - During the exam, a small camera preview stays in the corner. Each of these counts as an offense if it lasts longer than `FACE_GRACE_SECONDS` (default 3 s):
   - the face is not visible (covered, turned away, or left the seat)

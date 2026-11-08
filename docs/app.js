@@ -172,6 +172,8 @@
   /** Called by camera.js about twice a second. */
   function onCamStatus(st, ageMs) {
     paintCamBadge('camBox', 'camBadge', st);
+    $('camIndicator').classList.toggle('bad', st !== 'OK');
+    $('camIndicator').textContent = st === 'OK' ? '📷 Camera on' : '📷 ' + (CAM_TEXT[st] || st);
     if (!state.attemptId) { refreshStartButton(); return; }
     if (state.cam.warningOpen) {
       paintCamBadge('faceWarnBox', 'faceWarnBadge', st);
@@ -355,6 +357,9 @@
     } else if (state.cam.continuous) {
       $('camFloat').appendChild($('camBox')); // moving the element pauses it, so resume
       $('camFloat').hidden = false;
+      const preview = state.info.exam.cameraPreview !== false;
+      $('camFloat').classList.toggle('preview-off', !preview);
+      $('camIndicator').hidden = preview;
       window.ExamCamera.resume();
     }
     tick();
@@ -675,6 +680,7 @@
     if (!state.cam.required) return;
     window.ExamCamera.stop();
     $('camFloat').hidden = true;
+    $('camIndicator').hidden = true;
     $('faceWarnModal').hidden = true;
     state.cam.warningOpen = false;
   }
