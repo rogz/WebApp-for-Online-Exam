@@ -49,7 +49,7 @@
         <ul>
           <li><b>Switching tabs or windows will VOID your exam.</b> This includes opening another tab, minimizing the browser, using Alt+Tab / Cmd+Tab, or clicking another application.</li>
           <li><b>Multiple monitors are prohibited.</b> Disconnect any second monitor, TV or projector <u>before</u> starting. Connecting one during the exam will void it.</li>
-          <li><b>Do not refresh, close, or navigate away from this page.</b> That also voids your exam.</li>
+          <li id="ruleReload"><b>Do not refresh, close, or navigate away from this page.</b> That also voids your exam.</li>
           <li id="ruleCamera" hidden></li>
           <li id="ruleNav" hidden></li>
           <li>The timer starts when you click <i>Start exam</i>. When time runs out, your answers are submitted automatically.</li>
@@ -100,12 +100,13 @@
         <h1 id="examTitle2"></h1>
         <p class="muted" id="studentLine"></p>
       </div>
+      <div id="connBanner" class="notice bad conn-banner" role="alert" hidden></div>
       <div id="timeWarning" class="notice warn" hidden></div>
       <nav class="palette" id="palette" aria-label="Jump to question" hidden></nav>
       <ol id="questions" class="questions"></ol>
       <div class="card pager" id="pager" hidden>
         <button type="button" class="btn" id="prevBtn">← Previous</button>
-        <span id="pagerCount" class="muted"></span>
+        <span class="pager-mid"><span id="pagerCount" class="muted"></span> <span id="qTimer" class="q-timer" hidden></span></span>
         <button type="button" class="btn primary" id="nextBtn">Next →</button>
       </div>
       <div class="card submit-bar" id="submitBar">

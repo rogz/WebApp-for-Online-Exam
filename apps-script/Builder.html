@@ -60,6 +60,11 @@
       <option value="ONE">One question at a time</option>
     </select>
     <label class="check" id="allowBackWrap"><input type="checkbox" id="allowBack" checked> Allow going back to previous questions</label>
+    <div id="qTimeWrap">
+      <label for="questionSeconds">Time limit per question (seconds, 0 = none)</label>
+      <input type="number" id="questionSeconds" min="0" value="0" oninput="syncNav()">
+      <div class="muted">When time runs out the exam moves to the next question. Going back is turned off.</div>
+    </div>
     <label for="faceMode">Camera / face check</label>
     <select id="faceMode" onchange="syncCam()">
       <option value="OFF">Not required</option>
@@ -120,9 +125,13 @@
   }
   function syncNav() {
     var one = $('displayMode').value === 'ONE';
-    $('allowBack').disabled = !one;
-    $('allowBackWrap').style.opacity = one ? 1 : 0.5;
+    var perQ = one && Number($('questionSeconds').value) > 0;
+    $('questionSeconds').disabled = !one;
+    $('qTimeWrap').style.opacity = one ? 1 : 0.5;
+    $('allowBack').disabled = !one || perQ;
+    $('allowBackWrap').style.opacity = one && !perQ ? 1 : 0.5;
     if (!one) $('allowBack').checked = true;
+    if (perQ) $('allowBack').checked = false;
   }
   function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
 
@@ -188,7 +197,7 @@
     $('examList').innerHTML = DATA.exams.map(function (e, i) {
       return '<div class="exam-item"><b>' + esc(e.title) + '</b> <span class="muted">' + esc(e.id) + (e.course ? ' · ' + esc(e.course) : '') + (e.active ? '' : ' · inactive') + '</span>' +
         '<div class="muted">' + e.questionIds.length + ' questions · ' + (e.limitMin ? e.limitMin + ' min' : 'no limit') +
-        (e.displayMode === 'ONE' ? ' · one at a time' + (e.allowBack ? '' : ', no going back') : '') +
+        (e.displayMode === 'ONE' ? ' · one at a time' + (e.allowBack ? '' : ', no going back') + (e.questionSeconds ? ', ' + e.questionSeconds + ' s per question' : '') : '') +
         (e.faceMode === 'ALWAYS' ? ' · 📷 camera monitored' + (e.cameraPreview ? '' : ' (no preview)') : e.faceMode === 'START' ? ' · 📷 face check at start' : '') +
         (e.start ? ' · opens ' + esc(e.start.replace('T', ' ')) : '') + (e.end ? ' · closes ' + esc(e.end.replace('T', ' ')) : '') + '</div>' +
         '<div class="actions"><button onclick="editExam(' + i + ')">Edit</button>' +
@@ -205,7 +214,8 @@
     $('instructions').value = e.instructions; $('start').value = e.start; $('end').value = e.end;
     $('limit').value = e.limitMin; $('shuffleQuestions').checked = e.shuffleQuestions;
     $('shuffleChoices').checked = e.shuffleChoices; $('showScore').checked = e.showScore; $('active').checked = e.active;
-    $('displayMode').value = e.displayMode || 'ALL'; $('allowBack').checked = e.allowBack !== false; syncNav();
+    $('displayMode').value = e.displayMode || 'ALL'; $('allowBack').checked = e.allowBack !== false;
+    $('questionSeconds').value = e.questionSeconds || 0; syncNav();
     $('faceMode').value = e.faceMode || 'OFF';
     $('cameraPreview').checked = e.cameraPreview !== false; syncCam();
     selected = {}; selectedOrder = [];
@@ -223,7 +233,7 @@
     ['shuffleQuestions', 'shuffleChoices', 'showScore', 'active', 'allowBack'].forEach(function (id) { $(id).checked = true; });
     $('faceMode').value = 'ALWAYS';
     $('cameraPreview').checked = true; syncCam();
-    $('displayMode').value = 'ALL'; syncNav();
+    $('displayMode').value = 'ALL'; $('questionSeconds').value = 0; syncNav();
     selected = {}; selectedOrder = [];
     hideMsg(); if (DATA) renderBank();
   }
@@ -234,7 +244,7 @@
       start: $('start').value, end: $('end').value, limitMin: $('limit').value,
       shuffleQuestions: $('shuffleQuestions').checked, shuffleChoices: $('shuffleChoices').checked,
       showScore: $('showScore').checked, active: $('active').checked, questionIds: selectedOrder.slice(),
-      displayMode: $('displayMode').value, allowBack: $('allowBack').checked, faceMode: $('faceMode').value, cameraPreview: $('cameraPreview').checked
+      displayMode: $('displayMode').value, allowBack: $('allowBack').checked, questionSeconds: $('questionSeconds').value, faceMode: $('faceMode').value, cameraPreview: $('cameraPreview').checked
     };
     $('saveBtn').disabled = true;
     google.script.run.withSuccessHandler(function (r) {

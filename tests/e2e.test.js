@@ -159,7 +159,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await p.close();
   p = await open('LATER');
   await p.waitForSelector('#screen-rules:not([hidden])'); await p.check('#agree');
-  ok(await p.isDisabled('#startBtn') && (await p.textContent('#windowNotice')).includes('not open yet'), 'not-yet-open exam blocked');
+  ok(await p.isDisabled('#startBtn') && (await p.textContent('#windowNotice')).includes('opens in'), 'not-yet-open exam blocked');
   ok(gas.call({ action: 'start', examId: 'LATER', studentId: 'Z', name: 'Z', env: { monitorCheck: 'supported' } }).code === 'NOT_YET_OPEN', 'server enforces window');
   await p.close();
 

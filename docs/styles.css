@@ -130,6 +130,10 @@ textarea.essay { min-height: 160px; resize: vertical; }
 
 .pager { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .pager .btn { min-width: 120px; }
+.pager-mid { text-align: center; }
+.q-timer { display: inline-block; margin-left: 6px; padding: 1px 8px; border-radius: 6px; border: 1px solid var(--border); font-weight: 700; font-variant-numeric: tabular-nums; }
+.q-timer.low { color: var(--danger); border-color: var(--danger); }
+.conn-banner { position: sticky; top: 64px; z-index: 5; font-weight: 600; box-shadow: 0 2px 8px rgba(0, 0, 0, .15); }
 .palette { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
 .palette button {
   width: 40px; height: 36px; border-radius: 6px; border: 1px solid var(--border);

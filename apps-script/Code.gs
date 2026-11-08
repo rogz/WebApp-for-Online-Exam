@@ -34,11 +34,11 @@ const HEADERS = {
   Questions: ['QuestionID', 'Type', 'Question', 'Choices', 'Answer', 'Points', 'Topic'],
   Exams: ['ExamID', 'Title', 'Instructions', 'QuestionIDs', 'StartDateTime', 'EndDateTime',
     'TimeLimitMinutes', 'ShuffleQuestions', 'ShuffleChoices', 'ShowScore', 'Active', 'Course',
-    'DisplayMode', 'AllowBack', 'FaceMonitor', 'CameraPreview'],
+    'DisplayMode', 'AllowBack', 'FaceMonitor', 'CameraPreview', 'QuestionTimeSeconds'],
   Roster: ['StudentID', 'Name', 'Email', 'AccessCode', 'Courses'],
   Attempts: ['AttemptID', 'ExamID', 'StudentID', 'Name', 'Status', 'StartedAt', 'Deadline',
     'SubmittedAt', 'Score', 'MaxScore', 'Percent', 'PendingEssays', 'Late', 'VoidReason',
-    'VoidedAt', 'AllowRetake', 'IsRetake', 'UserAgent', 'Course', 'Warnings'],
+    'VoidedAt', 'AllowRetake', 'IsRetake', 'UserAgent', 'Course', 'Warnings', 'LastSeen', 'DisconnectedAt', 'Reconnects'],
   Responses: ['AttemptID', 'ExamID', 'StudentID', 'QuestionID', 'Type', 'Question',
     'StudentAnswer', 'CorrectAnswer', 'IsCorrect', 'PointsEarned', 'MaxPoints'],
   Violations: ['Timestamp', 'AttemptID', 'ExamID', 'StudentID', 'Name', 'Event', 'Detail'],
@@ -54,10 +54,17 @@ const DEFAULT_SETTINGS = [
   ['SUBMIT_GRACE_SECONDS', 60, 'Extra seconds after the deadline during which a submission is still on time (network delays).'],
   ['FACE_GRACE_SECONDS', 3, 'Camera-monitored exams: seconds a problem (face hidden, camera covered, extra person, phone) must last before it counts. 1st time = warning, 2nd time = voided.'],
   ['PHONE_DETECTION', true, 'Camera-monitored exams: TRUE = also watch for a mobile phone held in front of the camera.'],
+  ['OPEN_COUNTDOWN', true, 'TRUE = before an exam opens, show students a countdown ("Opens in 1:05:30"). FALSE = only show the opening date.'],
+  ['TIME_WARNINGS', '5, 1', 'Minutes before time runs out when students get a "time left" warning, separated by commas (e.g. 10, 5, 1). Leave empty for no warnings.'],
+  ['RECONNECT_SECONDS', 60, 'If a student\'s internet drops or the page reloads, how many seconds they have to reconnect and continue. 0 = off (leaving or reloading the page voids the exam).'],
+  ['MAX_RECONNECTS', 3, 'How many times a student may reopen the exam page after a disconnection. More than this voids the exam.'],
 ];
 
 /** Camera events give one warning first; the next one voids the exam. */
 const WARNABLE_EVENTS = ['NO_FACE', 'CAMERA_BLOCKED', 'MULTIPLE_FACES', 'PHONE_DETECTED', 'CAMERA_OFF'];
+
+/** The page pings every 20 s; allow this much extra on the server before counting a gap. */
+const PING_SLACK_MS = 30000;
 
 const STATUS = {
   IN_PROGRESS: 'IN_PROGRESS',
@@ -76,6 +83,8 @@ const VIOLATION_LABELS = {
   MULTIPLE_FACES: 'More than one person was in front of the camera',
   PHONE_DETECTED: 'A mobile phone was seen on camera',
   CAMERA_OFF: 'The camera was turned off or disconnected',
+  CONNECTION_LOST: 'Was disconnected for longer than allowed',
+  TOO_MANY_RECONNECTS: 'Reconnected more times than allowed',
 };
 
 // ───────────────────────────── Web App API ─────────────────────────────
@@ -116,6 +125,7 @@ const API_ = {
         displayMode: exam.displayMode,
         faceMode: exam.faceMode,
         cameraPreview: exam.cameraPreview,
+        questionSeconds: exam.questionSeconds,
         allowBack: exam.allowBack,
         instructions: exam.instructions,
         questionCount: questions.length,
@@ -136,6 +146,10 @@ const API_ = {
         blockCopyPaste: settings.BLOCK_COPY_PASTE,
         faceGraceSeconds: settings.FACE_GRACE_SECONDS,
         phoneDetection: settings.PHONE_DETECTION,
+        openCountdown: settings.OPEN_COUNTDOWN,
+        timeWarnings: settings.TIME_WARNINGS,
+        reconnectSeconds: settings.RECONNECT_SECONDS,
+        maxReconnects: settings.MAX_RECONNECTS,
       },
       rosterEnabled: roster.length > 0,
       requiresAccessCode: roster.some(r => String(r.AccessCode).trim() !== ''),
@@ -189,6 +203,7 @@ const API_ = {
         if (last.Status === STATUS.IN_PROGRESS) {
           const dl = toDate_(last.Deadline);
           if (!dl || now <= dl) {
+            checkReconnect_(attempts, last, settings, now); // throws if too late / too many times
             attempt = last; // resume (e.g. browser crashed or lost connection)
             resumed = true;
           } else {
@@ -241,6 +256,8 @@ const API_ = {
           VoidedAt: '',
           AllowRetake: false,
           IsRetake: isRetake,
+          LastSeen: now,
+          Reconnects: 0,
           UserAgent: asText_(String(env.userAgent || '').slice(0, 300)),
           Course: asText_(exam.course),
         };
@@ -254,6 +271,7 @@ const API_ = {
         studentId: studentId,
         studentName: name,
         resumed: resumed,
+        reconnects: Number(attempt.Reconnects) || 0,
         isRetake: toBool_(attempt.IsRetake, false),
         deadlineMs: deadline ? deadline.getTime() : null,
         remainingMs: deadline ? Math.max(0, deadline.getTime() - now.getTime()) : null,
@@ -303,6 +321,36 @@ const API_ = {
     });
   },
 
+  /** Heartbeat while the exam page is open (every 20 s). Voids if the page was gone too long. */
+  ping(req) {
+    return withLock_(() => {
+      const attempts = readTable_(SHEET.ATTEMPTS);
+      const a = findAttempt_(attempts, req.attemptId);
+      if (a.Status !== STATUS.IN_PROGRESS) return { status: a.Status, reason: a.VoidReason };
+      if (!enforceConnectionGap_(attempts, a, getSettings_(), new Date())) return { status: a.Status, reason: a.VoidReason };
+      updateFields_(attempts, a, { LastSeen: new Date(), DisconnectedAt: '' });
+      return { status: a.Status };
+    });
+  },
+
+  /** The page is closing or reloading (sent with navigator.sendBeacon). Starts the reconnect window. */
+  disconnect(req) {
+    return withLock_(() => {
+      const attempts = readTable_(SHEET.ATTEMPTS);
+      const a = findAttempt_(attempts, req.attemptId);
+      if (a.Status !== STATUS.IN_PROGRESS) return { status: a.Status };
+      const settings = getSettings_();
+      if (!(settings.RECONNECT_SECONDS > 0)) {
+        logViolation_(a, 'PAGE_CLOSED', 'VOIDED: ' + String(req.detail || 'page closed'));
+        voidAttempt_(attempts, a, 'PAGE_CLOSED');
+        return { status: a.Status };
+      }
+      logViolation_(a, 'DISCONNECTED', 'Page closed or reloaded. Has ' + settings.RECONNECT_SECONDS + ' s to reconnect. ' + String(req.detail || ''));
+      updateFields_(attempts, a, { DisconnectedAt: new Date() });
+      return { status: a.Status };
+    });
+  },
+
   /** Grades and records the submission. */
   submit(req) {
     return withLock_(() => {
@@ -325,6 +373,7 @@ const API_ = {
 
       const settings = getSettings_();
       const now = new Date();
+      if (!enforceConnectionGap_(attempts, a, settings, now)) throw blockedError_(a);
       const deadline = toDate_(a.Deadline);
       const late = !!deadline && now.getTime() > deadline.getTime() + settings.SUBMIT_GRACE_SECONDS * 1000;
 
@@ -480,9 +529,13 @@ function examConfig_(row) {
     displayMode: String(row.DisplayMode || '').trim().toUpperCase() === 'ONE' ? 'ONE' : 'ALL',
     faceMode: parseFaceMode_(row.FaceMonitor),
     cameraPreview: toBool_(row.CameraPreview, true),
+    questionSeconds: Math.max(0, Math.round(Number(row.QuestionTimeSeconds) || 0)),
   };
   // "No going back" only makes sense when questions are shown one at a time
   cfg.allowBack = cfg.displayMode === 'ONE' ? toBool_(row.AllowBack, true) : true;
+  // A time limit per question only works one question at a time, and without going back
+  if (cfg.displayMode !== 'ONE') cfg.questionSeconds = 0;
+  if (cfg.questionSeconds > 0) cfg.allowBack = false;
   return cfg;
 }
 
@@ -566,6 +619,44 @@ function lockedAnswers_(attemptId) {
     if (String(r.AttemptID) === String(attemptId) && !(q in out)) out[q] = r.Answer === null ? '' : String(r.Answer);
   });
   return out;
+}
+
+/**
+ * Reconnect rules when a student reopens an exam that is still in progress.
+ * Allowed only within RECONNECT_SECONDS of losing contact, and at most MAX_RECONNECTS times.
+ * With RECONNECT_SECONDS = 0 the old behaviour applies (resume only after a crash).
+ */
+function checkReconnect_(attempts, a, settings, now) {
+  if (!(settings.RECONNECT_SECONDS > 0)) return;
+  const disc = toDate_(a.DisconnectedAt);
+  const ref = disc || toDate_(a.LastSeen) || toDate_(a.StartedAt);
+  const gapMs = ref ? now.getTime() - ref.getTime() : 0;
+  const allowedMs = settings.RECONNECT_SECONDS * 1000 + (disc ? 0 : PING_SLACK_MS);
+  const used = Number(a.Reconnects) || 0;
+  if (gapMs > allowedMs) {
+    logViolation_(a, 'CONNECTION_LOST', 'VOIDED: came back after ' + Math.round(gapMs / 1000) + ' s (limit ' + settings.RECONNECT_SECONDS + ' s)');
+    voidAttempt_(attempts, a, 'CONNECTION_LOST');
+    throw blockedError_(a);
+  }
+  if (used >= settings.MAX_RECONNECTS) {
+    logViolation_(a, 'TOO_MANY_RECONNECTS', 'VOIDED: tried to reconnect ' + (used + 1) + ' times (limit ' + settings.MAX_RECONNECTS + ')');
+    voidAttempt_(attempts, a, 'TOO_MANY_RECONNECTS');
+    throw blockedError_(a);
+  }
+  logViolation_(a, 'RECONNECTED', 'Reconnect ' + (used + 1) + ' of ' + settings.MAX_RECONNECTS + ' after ' + Math.round(gapMs / 1000) + ' s');
+  updateFields_(attempts, a, { Reconnects: used + 1, DisconnectedAt: '', LastSeen: now });
+}
+
+/** Voids the attempt if the page has been out of contact longer than allowed. Returns false if voided. */
+function enforceConnectionGap_(attempts, a, settings, now) {
+  if (!(settings.RECONNECT_SECONDS > 0)) return true;
+  const ref = toDate_(a.LastSeen);
+  if (!ref) return true; // started before this feature existed
+  const gapMs = now.getTime() - ref.getTime();
+  if (gapMs <= settings.RECONNECT_SECONDS * 1000 + PING_SLACK_MS) return true;
+  logViolation_(a, 'CONNECTION_LOST', 'VOIDED: no contact for ' + Math.round(gapMs / 1000) + ' s (limit ' + settings.RECONNECT_SECONDS + ' s)');
+  voidAttempt_(attempts, a, 'CONNECTION_LOST');
+  return false;
 }
 
 function findAttempt_(table, attemptId) {
@@ -706,7 +797,7 @@ function builderGetData() {
       end: e.end ? Utilities.formatDate(e.end, tz, "yyyy-MM-dd'T'HH:mm") : '',
       limitMin: e.limitMin, shuffleQuestions: e.shuffleQuestions, shuffleChoices: e.shuffleChoices,
       showScore: e.showScore, active: toBool_(r.Active, true), link: examLink_(e.id, settings),
-      displayMode: e.displayMode, allowBack: e.allowBack, faceMode: e.faceMode, cameraPreview: e.cameraPreview,
+      displayMode: e.displayMode, allowBack: e.allowBack, faceMode: e.faceMode, cameraPreview: e.cameraPreview, questionSeconds: e.questionSeconds,
     };
   });
   return {
@@ -771,7 +862,8 @@ function builderSaveExam(form) {
     DisplayMode: form.displayMode === 'ONE' ? 'ONE' : 'ALL',
     FaceMonitor: parseFaceMode_(form.faceMode),
     CameraPreview: form.cameraPreview !== false,
-    AllowBack: form.displayMode === 'ONE' ? form.allowBack !== false : true,
+    QuestionTimeSeconds: form.displayMode === 'ONE' ? Math.max(0, Math.round(Number(form.questionSeconds) || 0)) : 0,
+    AllowBack: form.displayMode === 'ONE' ? (form.allowBack !== false && !(Number(form.questionSeconds) > 0)) : true,
   };
   const existing = table.rows.find(r => String(r.ExamID).trim().toLowerCase() === examId.toLowerCase());
   if (existing) {
@@ -925,13 +1017,19 @@ function getSettings_() {
   try {
     readTable_(SHEET.SETTINGS).rows.forEach(r => {
       const k = String(r.Key).trim();
-      if (k && r.Value !== '' && r.Value !== null) s[k] = r.Value;
+      // An empty TIME_WARNINGS means "no warnings"; other empty values fall back to the default
+      if (k && ((r.Value !== '' && r.Value !== null) || k === 'TIME_WARNINGS')) s[k] = r.Value;
     });
   } catch (e) { /* use defaults */ }
   s.BLUR_GRACE_SECONDS = Math.max(0, Number(s.BLUR_GRACE_SECONDS) || 0);
   s.SUBMIT_GRACE_SECONDS = Math.max(0, Number(s.SUBMIT_GRACE_SECONDS) || 0);
   s.FACE_GRACE_SECONDS = Math.max(1, Number(s.FACE_GRACE_SECONDS) || 3);
   s.PHONE_DETECTION = toBool_(s.PHONE_DETECTION, true);
+  s.OPEN_COUNTDOWN = toBool_(s.OPEN_COUNTDOWN, true);
+  s.TIME_WARNINGS = String(s.TIME_WARNINGS === undefined || s.TIME_WARNINGS === null ? '' : s.TIME_WARNINGS)
+    .split(/[,;\s]+/).map(Number).filter(n => n > 0).sort((a, b) => b - a);
+  s.RECONNECT_SECONDS = s.RECONNECT_SECONDS === '' ? 60 : Math.max(0, Math.round(Number(s.RECONNECT_SECONDS) || 0));
+  s.MAX_RECONNECTS = Math.max(0, Math.round(Number(s.MAX_RECONNECTS) || 0));
   s.REQUIRE_MONITOR_CHECK = toBool_(s.REQUIRE_MONITOR_CHECK, true);
   s.BLOCK_COPY_PASTE = toBool_(s.BLOCK_COPY_PASTE, true);
   s.STUDENT_APP_URL = String(s.STUDENT_APP_URL || '').trim();

@@ -22,8 +22,13 @@
     voided: false,
     submitting: false,
     violations: [],
-    warned5: false,
-    warned1: false,
+    warned: new Set(),   // time warnings already shown (minutes)
+    qEndAt: null,        // per-question deadline (one-at-a-time with a time limit per question)
+    unloading: false,    // the page is closing or reloading (reconnect allowed)
+    disconnectSent: false,
+    hiddenTimer: null,
+    lastOkAt: 0,         // last successful contact with the server
+    offlineSince: null,  // when the connection was lost
     oneAtATime: false,   // show one question at a time
     allowBack: true,     // may return to earlier questions (one-at-a-time mode)
     index: 0,            // current question in one-at-a-time mode
@@ -229,7 +234,10 @@
     const n = $('windowNotice');
     if (ws === 'NOT_YET_OPEN') {
       n.hidden = false; n.className = 'notice';
-      n.textContent = 'This exam is not open yet. It opens on ' + state.info.exam.startText + '. This page will let you start once it opens.';
+      const until = state.info.exam.startMs - (Date.now() + state.serverOffset);
+      n.textContent = state.rules.openCountdown
+        ? 'This exam opens in ' + fmtCountdown(until) + ' (' + state.info.exam.startText + '). Keep this page open: you can start as soon as it opens.'
+        : 'This exam is not open yet. It opens on ' + state.info.exam.startText + '. This page will let you start once it opens.';
     } else if (ws === 'CLOSED') {
       n.hidden = false; n.className = 'notice bad';
       n.textContent = 'This exam closed on ' + state.info.exam.endText + '. If your instructor allowed you a retake, you can still start.';
@@ -272,8 +280,19 @@
       $('ruleCamera').innerHTML = '📷 <b>Your face must be visible to the camera before you can start.</b> Sit facing the screen in a well-lit place, with only you in view.';
       $('camHelp').textContent = 'Turn on your camera so we can check that your face is visible. The camera turns off when the exam starts.';
     }
+    const rs = rules.reconnectSeconds || 0;
+    if (rs > 0) {
+      $('ruleReload').innerHTML = '<b>If your internet drops or the page reloads</b>, reopen the same exam link within <b>' + fmtDuration(rs) +
+        '</b> to continue (up to ' + rules.maxReconnects + ' time' + (rules.maxReconnects === 1 ? '' : 's') + '). Your timer keeps running. ' +
+        'Taking longer voids your exam. <b>Do not close or reload this page on purpose.</b>';
+    }
+    if (exam.questionSeconds > 0) {
+      $('ruleNav').hidden = false;
+      $('ruleNav').innerHTML = 'Questions are shown <b>one at a time</b>, with <b>' + fmtDuration(exam.questionSeconds) + ' per question</b>. ' +
+        'When the time is up, the exam moves on automatically. <b>You cannot go back</b> to earlier questions.';
+    }
     const nav = $('ruleNav');
-    if (exam.displayMode === 'ONE') {
+    if (exam.displayMode === 'ONE' && !(exam.questionSeconds > 0)) {
       nav.hidden = false;
       nav.innerHTML = exam.allowBack
         ? 'Questions are shown <b>one at a time</b>. You can go back to earlier questions before submitting.'
@@ -338,6 +357,8 @@
       try { state.answers = JSON.parse(localStorage.getItem(storageKey()) || '{}') || {}; } catch (e) { state.answers = {}; }
     }
     state.endAt = r.remainingMs === null || r.remainingMs === undefined ? null : Date.now() + r.remainingMs;
+    // Skip warnings longer than the time available (no "5 minutes left" on a 3-minute exam)
+    if (state.endAt !== null) (state.rules.timeWarnings || []).forEach((m) => { if (m * 60000 >= r.remainingMs) state.warned.add(m); });
 
     state.oneAtATime = state.info.exam.displayMode === 'ONE';
     state.allowBack = !state.oneAtATime || state.info.exam.allowBack !== false;
@@ -364,6 +385,13 @@
     }
     tick();
     state.timerId = setInterval(tick, 250);
+    state.lastOkAt = Date.now();
+    if (state.rules.reconnectSeconds > 0) state.pingId = setInterval(ping, 20000);
+    if (r.resumed && state.rules.reconnectSeconds > 0) {
+      const w = $('timeWarning');
+      w.hidden = false; w.className = 'notice';
+      w.textContent = 'Reconnected — you can continue. Reconnects used: ' + r.reconnects + ' of ' + state.rules.maxReconnects + '. Your timer kept running while you were away.';
+    }
     // A monitor may have been connected while the start request was in flight
     checkMonitorDuringExam();
   }
@@ -514,6 +542,9 @@
     $('prevBtn').hidden = !state.allowBack;
     $('prevBtn').disabled = state.index === 0;
     $('nextBtn').textContent = last ? 'Submit exam' : 'Next →';
+    const qs = state.info.exam.questionSeconds || 0;
+    state.qEndAt = qs > 0 ? Date.now() + qs * 1000 : null;
+    $('qTimer').hidden = !(qs > 0);
     window.scrollTo(0, 0);
   }
 
@@ -529,23 +560,33 @@
     const q = state.questions[state.index];
     const last = state.index === state.questions.length - 1;
     if (last) { askSubmit(); return; }
-    const advance = () => {
-      if (!state.allowBack) {
-        state.locked.add(q.id);
-        lockInputs(q.id);
-        const value = state.answers[q.id] === undefined ? '' : state.answers[q.id];
-        api('lockAnswer', { attemptId: state.attemptId, questionId: q.id, value }, 3).catch((e) => {
-          if (e.code === 'VOIDED') showVoid(null, e.message);
-        });
-      }
-      showQuestion(state.index + 1);
-    };
+    const advance = () => advanceFrom(q);
     if (!state.allowBack && !isAnswered(q.id)) {
       confirmBox('Skip this question?', 'You have not answered Question ' + (state.index + 1) +
         '. You cannot come back to it after moving on.', 'Skip it', 'Go back', advance);
       return;
     }
     advance();
+  }
+
+  function advanceFrom(q) {
+    if (!state.active || state.questions[state.index] !== q) return;
+    if (!state.allowBack) {
+      state.locked.add(q.id);
+      lockInputs(q.id);
+      const value = state.answers[q.id] === undefined ? '' : state.answers[q.id];
+      sendReliably('lockAnswer', { attemptId: state.attemptId, questionId: q.id, value });
+    }
+    showQuestion(state.index + 1);
+  }
+
+  /** Time per question ran out: move on (or submit on the last question). */
+  function questionTimeUp() {
+    state.qEndAt = null;
+    const q = state.questions[state.index];
+    if (confirmAction) { $('confirmModal').hidden = true; confirmAction = null; }
+    if (state.index === state.questions.length - 1) { submitExam(true); return; }
+    advanceFrom(q);
   }
 
   function goPrev() {
@@ -570,21 +611,100 @@
     return (h ? h + ':' + pad(m) : pad(m)) + ':' + pad(sec);
   }
 
+  /** "2 d 03:15:20", "1:05:30", "04:59" */
+  function fmtCountdown(ms) {
+    const s = Math.max(0, Math.ceil(ms / 1000));
+    const d = Math.floor(s / 86400);
+    return (d ? d + (d === 1 ? ' day ' : ' days ') : '') + fmtTime((s % 86400) * 1000);
+  }
+
+  /** 60 → "1 minute", 90 → "1 min 30 s", 45 → "45 seconds" */
+  function fmtDuration(sec) {
+    const m = Math.floor(sec / 60), r = sec % 60;
+    if (!m) return sec + (sec === 1 ? ' second' : ' seconds');
+    if (!r) return m + (m === 1 ? ' minute' : ' minutes');
+    return m + ' min ' + r + ' s';
+  }
+
   function tick() {
     if (!state.active) return;
+    tickConnection();
+    if (!state.active) return;
+    if (state.qEndAt !== null) {
+      const ql = state.qEndAt - Date.now();
+      $('qTimer').textContent = '⏱ ' + fmtTime(ql);
+      $('qTimer').classList.toggle('low', ql <= 10000);
+      if (ql <= 0) { questionTimeUp(); return; }
+    }
     const el = $('timer');
     if (state.endAt === null) { el.textContent = 'No time limit'; return; }
     const left = state.endAt - Date.now();
     el.textContent = fmtTime(left);
     el.classList.toggle('low', left <= 60000);
-    const warn = $('timeWarning');
-    if (left <= 300000 && !state.warned5 && left > 60000) {
-      state.warned5 = true; warn.hidden = false; warn.textContent = '5 minutes left. Your answers will be submitted automatically when time runs out.';
-    }
-    if (left <= 60000 && !state.warned1) {
-      state.warned1 = true; warn.hidden = false; warn.className = 'notice bad'; warn.textContent = 'Less than 1 minute left!';
+    // Teacher-chosen warnings, e.g. [10, 5, 1] minutes before the end
+    const due = (state.rules.timeWarnings || []).filter((m) => left <= m * 60000 && !state.warned.has(m));
+    if (due.length && left > 0) {
+      const m = Math.min.apply(null, due);
+      state.rules.timeWarnings.forEach((x) => { if (x >= m) state.warned.add(x); });
+      const smallest = Math.min.apply(null, state.rules.timeWarnings);
+      const warn = $('timeWarning');
+      warn.hidden = false;
+      warn.className = m === smallest ? 'notice bad' : 'notice warn';
+      warn.textContent = (m < 1 ? Math.round(m * 60) + ' seconds' : m + (m === 1 ? ' minute' : ' minutes')) +
+        ' left. Your answers will be submitted automatically when time runs out.';
     }
     if (left <= 0) submitExam(true);
+  }
+
+  // ───────── Connection & reconnect ─────────
+
+  function markOnline() {
+    state.lastOkAt = Date.now();
+    if (state.offlineSince !== null) {
+      state.offlineSince = null;
+      $('connBanner').hidden = true;
+    }
+  }
+
+  function markOffline(since) {
+    if (state.offlineSince === null) state.offlineSince = since || Date.now();
+  }
+
+  async function ping() {
+    if (!state.active || !(state.rules.reconnectSeconds > 0)) return;
+    try {
+      const r = await api('ping', { attemptId: state.attemptId });
+      markOnline();
+      if (r.status === 'VOIDED') showVoid(null, 'Your exam was voided: ' + (r.reason || 'exam rules were broken') + '. Please inform your instructor.');
+    } catch (e) {
+      if (e.code === 'NETWORK') markOffline(state.lastOkAt);
+    }
+  }
+
+  /** Shows the "connection lost" banner and voids the exam if the limit passes. */
+  function tickConnection() {
+    const rs = state.rules.reconnectSeconds || 0;
+    if (!(rs > 0) || state.offlineSince === null) return;
+    const left = rs * 1000 - (Date.now() - state.offlineSince);
+    const b = $('connBanner');
+    b.hidden = false;
+    b.textContent = '⚠ Connection lost — trying to reconnect… Keep this page open. ' +
+      'If you are not back online within ' + fmtTime(left) + ', your exam will be voided.';
+    if (Date.now() - (state.lastRetryAt || 0) > 5000) { state.lastRetryAt = Date.now(); ping(); }
+    if (left <= 0 && !state.submitting) voidExam('CONNECTION_LOST', 'Offline for more than ' + rs + ' s.');
+  }
+
+  /** Sends now, or keeps retrying every 5 s while offline (up to 10 minutes). */
+  function sendReliably(action, payload) {
+    let tries = 0;
+    const attempt = () => api(action, payload).then((r) => { markOnline(); return r; }).catch((e) => {
+      if (e.code === 'VOIDED') { showVoid(null, e.message); return; }
+      if (e.code !== 'NETWORK') return;
+      markOffline(state.lastOkAt);
+      if (++tries < 120) setTimeout(attempt, 5000);
+      else beacon(action, payload);
+    });
+    attempt();
   }
 
   // ───────── Submit ─────────
@@ -625,6 +745,8 @@
   function finishExam() {
     state.active = false;
     clearInterval(state.timerId);
+    clearInterval(state.pingId);
+    $('connBanner').hidden = true;
     stopCamera();
     document.body.classList.remove('locked');
     try { localStorage.removeItem(storageKey()); } catch (e) { /* ignore */ }
@@ -656,10 +778,11 @@
     MULTIPLE_FACES: 'More than one person was in front of the camera.',
     PHONE_DETECTED: 'A mobile phone was seen on camera.',
     CAMERA_OFF: 'Your camera was turned off or disconnected.',
+    CONNECTION_LOST: 'Your internet connection was lost for longer than allowed.',
   };
 
   function voidExam(event, detail) {
-    if (!state.active || state.voided) return;
+    if (!state.active || state.voided || state.unloading) return;
     state.voided = true;
     state.active = false;
     clearInterval(state.timerId);
@@ -668,9 +791,9 @@
 
     if (document.visibilityState === 'hidden') {
       // The page may be closing: a beacon is delivered even if the tab is gone.
-      if (!beacon('violation', payload)) api('violation', payload, 3).catch(() => {});
+      if (!beacon('violation', payload)) sendReliably('violation', payload);
     } else {
-      api('violation', payload, 3).catch(() => beacon('violation', payload));
+      sendReliably('violation', payload);
     }
     try { localStorage.removeItem(storageKey()); } catch (e) { /* ignore */ }
     showVoid(event);
@@ -689,6 +812,8 @@
     state.active = false;
     state.voided = true;
     clearInterval(state.timerId);
+    clearInterval(state.pingId);
+    $('connBanner').hidden = true;
     stopCamera();
     $('confirmModal').hidden = true;
     busy(false);
@@ -704,16 +829,38 @@
   let blurTimer = null;
   let unfocusedSince = null;
 
+  const reconnectOn = () => state.rules.reconnectSeconds > 0;
+
   function onHidden() {
-    if (state.active && document.visibilityState === 'hidden') {
-      voidExam('TAB_SWITCH', 'Page became hidden (tab switch, minimize, or another window covered it).');
-    }
+    if (!state.active || document.visibilityState !== 'hidden') return;
+    const go = () => voidExam('TAB_SWITCH', 'Page became hidden (tab switch, minimize, or another window covered it).');
+    if (!reconnectOn()) { go(); return; }
+    // A reload or closing the page also hides it; wait a moment to tell them apart.
+    if (!state.hiddenTimer) state.hiddenTimer = setTimeout(() => { state.hiddenTimer = null; go(); }, 500);
+  }
+
+  /** Page is closing or reloading. With reconnect on, this starts the reconnect window instead of voiding. */
+  function onLeaving() {
+    if (!state.active || state.disconnectSent) return;
+    if (!reconnectOn()) { voidExam('PAGE_CLOSED', 'pagehide'); return; }
+    state.unloading = true;
+    state.disconnectSent = true;
+    clearTimeout(state.hiddenTimer);
+    clearTimeout(blurTimer);
+    clearTimeout(state.blurVoidTimer);
+    beacon('disconnect', { attemptId: state.attemptId, detail: 'page closed or reloaded' });
   }
 
   function onBlur() {
     if (!state.active) return;
     const grace = state.rules.blurGraceSeconds * 1000;
-    if (grace <= 0) { voidExam('LEFT_WINDOW', 'Exam window lost focus.'); return; }
+    if (grace <= 0) {
+      if (!reconnectOn()) { voidExam('LEFT_WINDOW', 'Exam window lost focus.'); return; }
+      // Wait a moment so a reload (reconnect allowed) is not counted; coming back quickly still counts.
+      clearTimeout(state.blurVoidTimer);
+      state.blurVoidTimer = setTimeout(() => voidExam('LEFT_WINDOW', 'Exam window lost focus.'), 500);
+      return;
+    }
     clearTimeout(blurTimer);
     blurTimer = setTimeout(() => {
       if (state.active && !document.hasFocus()) voidExam('LEFT_WINDOW', 'Exam window lost focus for more than ' + state.rules.blurGraceSeconds + ' s.');
@@ -734,7 +881,7 @@
       checkMonitorDuringExam();
       if (!state.active) return;
       if (document.visibilityState === 'hidden') { onHidden(); return; }
-      if (!document.hasFocus()) {
+      if (!document.hasFocus() && !state.unloading) {
         if (unfocusedSince === null) unfocusedSince = Date.now();
         const limit = Math.max(1000, state.rules.blurGraceSeconds * 1000);
         if (Date.now() - unfocusedSince >= limit) voidExam('LEFT_WINDOW', 'Exam window did not have focus.');
@@ -758,8 +905,14 @@
     document.addEventListener('visibilitychange', onHidden);
     window.addEventListener('blur', onBlur);
     window.addEventListener('focus', onFocus);
-    window.addEventListener('pagehide', () => { if (state.active) voidExam('PAGE_CLOSED', 'pagehide'); });
-    window.addEventListener('beforeunload', (e) => { if (state.active) { e.preventDefault(); e.returnValue = ''; } });
+    window.addEventListener('pagehide', onLeaving);
+    window.addEventListener('beforeunload', (e) => {
+      if (!state.active) return;
+      if (reconnectOn()) { onLeaving(); return; } // reload allowed: reconnect within the time limit
+      e.preventDefault(); e.returnValue = '';
+    });
+    window.addEventListener('offline', () => { if (state.active && reconnectOn()) markOffline(Date.now()); });
+    window.addEventListener('online', () => { if (state.active) ping(); });
     if (window.screen && typeof window.screen.addEventListener === 'function') {
       window.screen.addEventListener('change', () => { checkMonitorDuringExam(); if (!state.attemptId && state.info) refreshStartButton(); });
     }

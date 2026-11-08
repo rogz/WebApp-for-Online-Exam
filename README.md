@@ -17,7 +17,8 @@ A free online exam system that needs **no database and no paid server**:
 | System check | **Start** stays disabled while a second monitor is connected |
 | Camera monitoring | Optional per exam: **not required**, **face check at the start only**, or **monitored during the whole exam**. The student's face must be visible before they can start. With full monitoring, during the exam a hidden face, a covered camera, a second person, a phone, or the camera turning off gives **one warning**, and **the second time voids the exam**. Video is checked in the browser only: nothing is recorded or uploaded. |
 | Anti-cheating | Switching tabs, minimizing, Alt+Tab, leaving or reloading the page, or plugging in a monitor mid-exam **voids the exam immediately**. A pop-up tells the student to inform their instructor. |
-| Time | Per-exam **time window** (opens/closes) and **time limit** (auto-submits when time is up) |
+| Time | Per-exam **time window** (opens/closes) and **time limit** (auto-submits when time is up). Also: a countdown before the exam opens, warnings at times you choose, and an optional time limit per question. |
+| Poor connection | If the internet drops or the page reloads, students can **reconnect within 1 minute** (adjustable, up to 3 times) and continue where they left off |
 | Retakes | The instructor can let a voided (or finished) student take the exam again |
 | Grading | MC, T/F and fill-in-the-blank are graded automatically. Essays are graded by the teacher in the sheet, then **Recalculate scores** updates the totals. |
 | Security | Answer keys never reach the student's browser. Times and windows are checked by the server. |
@@ -78,6 +79,7 @@ Use **Exam Admin → Check question bank for errors** to catch mistakes. You can
   - *All questions on one page*: students scroll and can change any answer until they submit.
   - *One question at a time*: Next / Previous buttons plus numbered buttons to jump between questions.
     - Untick **Allow going back** to make it forward-only. There is no Previous button, and each answer is **locked on the server** when the student clicks Next, saved in the `Progress` sheet. Students are warned before skipping an unanswered question.
+    - **Time limit per question** (seconds, 0 = none): a small ⏱ timer shows on each question. When it runs out, the exam moves to the next question, or submits after the last one. Going back is turned off automatically.
 - **Camera / face check**: *Not required*, *Check face at the start only*, or *Monitor face during the whole exam* (see below).
 - Options: shuffle questions, shuffle choices, show the score after submitting, active.
 - Click **Save exam**, then **Copy student link**.
@@ -116,6 +118,21 @@ If the Roster is empty, anyone with an exam link can take it. If you fill it in,
 - **AccessCode** (optional): if filled in, the student must type it. This stops someone from using another student's ID.
 - The **Attempts** sheet records the course of each attempt, so you can filter results by course.
 
+### Timers
+- **Before the exam opens:** the rules screen shows a live countdown ("This exam opens in 1 day 2:15:30"), and **Start exam** unlocks by itself at zero. Turn it off with `OPEN_COUNTDOWN` = FALSE.
+- **During the exam:** the countdown sits in the top bar and turns red in the last minute. Warnings appear at the minutes listed in `TIME_WARNINGS` (default `5, 1`; e.g. `10, 5, 1`; leave it empty for none). Warnings longer than the exam itself are skipped.
+- **Per question:** see *Time limit per question* above.
+
+### Poor connection / reconnecting
+With `RECONNECT_SECONDS` above 0 (default **60**):
+- **Internet drops while the page is open:** a red banner says *"Connection lost — trying to reconnect…"* and counts down. Students can keep answering, and answers are saved on their computer. If the connection returns in time, the exam simply continues. If not, the exam is voided.
+- **Page reloads or closes** (browser crash, accidental reload): the student reopens the same link and enters their ID within the time limit. The exam continues with the same answers and the same questions, up to `MAX_RECONNECTS` times (default 3).
+- **The timer keeps running** while they're away. Every disconnect and reconnect is logged in **Violations**, so you can see who reconnected and how often.
+- Switching tabs, Alt+Tab, and a second monitor still void the exam immediately. A reload is not mistaken for a tab switch.
+- The server checks the same limits, so the page can't be tampered with to get more time.
+- Set `RECONNECT_SECONDS` to `0` for the strict behavior: any reload or close voids the exam.
+- Note: a student could close the page on purpose and reopen it within the limit. Each time is logged, and `MAX_RECONNECTS` caps it.
+
 ### Camera monitoring
 In the Exam Builder, choose **Camera / face check**:
 
@@ -153,6 +170,10 @@ With **Monitor face during the whole exam**:
 | `SUBMIT_GRACE_SECONDS` | `60` | Seconds after the deadline that a submission still counts as on time |
 | `FACE_GRACE_SECONDS` | `3` | Camera exams: how long a problem must last before it counts as an offense |
 | `PHONE_DETECTION` | `TRUE` | Camera exams: also look for a phone held in front of the camera |
+| `OPEN_COUNTDOWN` | `TRUE` | Show a countdown before an exam opens |
+| `TIME_WARNINGS` | `5, 1` | Minutes before the end when students are warned; empty = no warnings |
+| `RECONNECT_SECONDS` | `60` | Time allowed to reconnect after the internet drops or the page reloads; `0` = off (reload voids) |
+| `MAX_RECONNECTS` | `3` | How many times a student may reopen the page during one attempt |
 
 ---
 
@@ -162,7 +183,7 @@ With **Monitor face during the whole exam**:
 |---|---|---|
 | Switching tabs, minimizing, opening a new window over the exam | ✅ all browsers | Voided |
 | Alt+Tab / Cmd+Tab, clicking another app or the other screen | ✅ all browsers | Voided |
-| Refreshing or closing the page | ✅ | Voided |
+| Refreshing or closing the page | ✅ | Allowed to reconnect within `RECONNECT_SECONDS` (max `MAX_RECONNECTS` times), otherwise voided |
 | Second monitor connected before start | ✅ Chrome/Edge (`screen.isExtended`) | Can't start |
 | Second monitor connected during the exam | ✅ Chrome/Edge | Voided |
 | Phone, second computer, another person, HDMI splitter or "mirror" mode | ❌ no website can see these | — |
@@ -182,6 +203,7 @@ docs/               student exam page (served by GitHub Pages)
 ```
 
 ## Developer tests
+`tests/timing.test.js` covers the countdowns, warnings, per-question timer, and reconnect rules.
 `tests/camera.test.js` runs the camera flow with the real MediaPipe detector and a fake webcam. See the comments at the top of the file for setup.
 
 `node tests/e2e.test.js` runs the backend against a fake Google Sheet and drives the student page in Chromium (needs the `playwright` package). It covers grading, tab-switch, Alt+Tab and second-monitor voiding, retakes, time limits, time windows, and essay re-scoring.
